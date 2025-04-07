@@ -5,14 +5,14 @@ from pytest import fixture
 import torch
 from typing import Tuple
 
-from sgm.inference.api import (
+from svd.sgm.inference.api import (
     model_specs,
     SamplingParams,
     SamplingPipeline,
     Sampler,
     ModelArchitecture,
 )
-import sgm.inference.helpers as helpers
+import svd.sgm.inference.helpers as helpers
 
 
 @pytest.mark.inference

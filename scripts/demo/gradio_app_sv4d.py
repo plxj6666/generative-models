@@ -14,7 +14,7 @@ from huggingface_hub import hf_hub_download
 from typing import List, Optional, Union
 import torchvision
 
-from sgm.modules.encoders.modules import VideoPredictionEmbedderWithEncoder
+from svd.sgm.modules.encoders.modules import VideoPredictionEmbedderWithEncoder
 from scripts.demo.sv4d_helpers import (
     decode_latents,
     load_model,

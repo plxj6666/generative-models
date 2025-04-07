@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.utils.benchmark as benchmark
 from torch.backends.cuda import SDPBackend
 
-from sgm.modules.attention import BasicTransformerBlock, SpatialTransformer
+from svd.sgm.modules.attention import BasicTransformerBlock, SpatialTransformer
 
 
 def benchmark_attn():
@@ -233,7 +233,7 @@ def benchmark_transformer_blocks():
 
 def test01():
     # conv1x1 vs linear
-    from sgm.util import count_params
+    from svd.sgm.util import count_params
 
     conv = torch.nn.Conv2d(3, 32, kernel_size=1).cuda()
     print(count_params(conv))

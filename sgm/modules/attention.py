@@ -9,7 +9,7 @@ from einops import rearrange, repeat
 from packaging import version
 from torch import nn
 from torch.utils.checkpoint import checkpoint
-
+from typing import Dict
 logpy = logging.getLogger(__name__)
 
 if version.parse(torch.__version__) >= version.parse("2.0.0"):
@@ -616,16 +616,12 @@ class BasicTransformerSingleLayerBlock(nn.Module):
         return x
 
 
+# --- 修改 SpatialTransformer 类 ---
 class SpatialTransformer(nn.Module):
     """
     Transformer block for image-like data.
-    First, project the input (aka embedding)
-    and reshape to b, t, d.
-    Then apply standard transformer action.
-    Finally, reshape to image
-    NEW: use_linear for more efficiency instead of the 1x1 convs
+    Modfied to accept f_attr_context_dim and use BasicTransformerBlockWithHifiVFSContext.
     """
-
     def __init__(
         self,
         in_channels,
@@ -633,76 +629,74 @@ class SpatialTransformer(nn.Module):
         d_head,
         depth=1,
         dropout=0.0,
-        context_dim=None,
+        context_dim=None, # DIL context_dim
+        f_attr_context_dim=None, # <<<--- 新增 FAL context_dim
         disable_self_attn=False,
         use_linear=False,
-        attn_type="softmax",
+        attn_type="softmax", # 注意：这里是字符串，传递给 BasicBlock
         use_checkpoint=True,
-        # sdp_backend=SDPBackend.FLASH_ATTENTION
-        sdp_backend=None,
+        sdp_backend=None, # <<<--- 新增 sdp_backend
     ):
         super().__init__()
         logpy.debug(
             f"constructing {self.__class__.__name__} of depth {depth} w/ "
             f"{in_channels} channels and {n_heads} heads."
         )
-
+        # --- 处理 context_dim 列表 (保持不变) ---
         if exists(context_dim) and not isinstance(context_dim, list):
-            context_dim = [context_dim]
-        if exists(context_dim) and isinstance(context_dim, list):
-            if depth != len(context_dim):
-                logpy.warn(
-                    f"{self.__class__.__name__}: Found context dims "
-                    f"{context_dim} of depth {len(context_dim)}, which does not "
-                    f"match the specified 'depth' of {depth}. Setting context_dim "
-                    f"to {depth * [context_dim[0]]} now."
-                )
-                # depth does not match context dims.
-                assert all(
-                    map(lambda x: x == context_dim[0], context_dim)
-                ), "need homogenous context_dim to match depth automatically"
-                context_dim = depth * [context_dim[0]]
+            context_dim = [context_dim] * depth # 确保 context_dim 是列表
         elif context_dim is None:
             context_dim = [None] * depth
+        elif len(context_dim) != depth:
+             logpy.warning(f"{self.__class__.__name__}: context_dim list length ({len(context_dim)}) != depth ({depth}). Using first element.")
+             context_dim = [context_dim[0]] * depth
+
+        # --- 新增：处理 f_attr_context_dim 列表 ---
+        if exists(f_attr_context_dim) and not isinstance(f_attr_context_dim, list):
+            f_attr_context_dim = [f_attr_context_dim] * depth
+        elif f_attr_context_dim is None:
+            f_attr_context_dim = [None] * depth
+        elif len(f_attr_context_dim) != depth:
+             logpy.warning(f"{self.__class__.__name__}: f_attr_context_dim list length ({len(f_attr_context_dim)}) != depth ({depth}). Using first element.")
+             f_attr_context_dim = [f_attr_context_dim[0]] * depth
+        # --- 新增结束 ---
+
         self.in_channels = in_channels
         inner_dim = n_heads * d_head
         self.norm = Normalize(in_channels)
         if not use_linear:
-            self.proj_in = nn.Conv2d(
-                in_channels, inner_dim, kernel_size=1, stride=1, padding=0
-            )
+            self.proj_in = nn.Conv2d(in_channels, inner_dim, kernel_size=1, stride=1, padding=0)
         else:
             self.proj_in = nn.Linear(in_channels, inner_dim)
 
+        # --- 实例化修改后的 Transformer Block ---
         self.transformer_blocks = nn.ModuleList(
             [
-                BasicTransformerBlock(
+                BasicTransformerBlockWithHifiVFSContext( # <<<--- 使用修改后的 Block
                     inner_dim,
                     n_heads,
                     d_head,
                     dropout=dropout,
-                    context_dim=context_dim[d],
+                    context_dim=context_dim[d], # DIL context
+                    f_attr_context_dim=f_attr_context_dim[d], # <<<--- 传入 FAL context
                     disable_self_attn=disable_self_attn,
-                    attn_mode=attn_type,
+                    attn_mode=attn_type, # 传递字符串模式
                     checkpoint=use_checkpoint,
-                    sdp_backend=sdp_backend,
+                    sdp_backend=sdp_backend, # 传递 backend
                 )
                 for d in range(depth)
             ]
         )
+        # --- 修改结束 ---
+
         if not use_linear:
-            self.proj_out = zero_module(
-                nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0)
-            )
+            self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0))
         else:
-            # self.proj_out = zero_module(nn.Linear(in_channels, inner_dim))
             self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
         self.use_linear = use_linear
 
-    def forward(self, x, context=None):
+    def forward(self, x: torch.Tensor, context: Optional[Dict] = None) -> torch.Tensor: # <<<--- 修改 context 类型为 Dict
         # note: if no context is given, cross-attention defaults to self-attention
-        if not isinstance(context, list):
-            context = [context]
         b, c, h, w = x.shape
         x_in = x
         x = self.norm(x)
@@ -711,17 +705,19 @@ class SpatialTransformer(nn.Module):
         x = rearrange(x, "b c h w -> b (h w) c").contiguous()
         if self.use_linear:
             x = self.proj_in(x)
+
+        # --- 将完整的 context 字典传递给每个 block ---
         for i, block in enumerate(self.transformer_blocks):
-            if i > 0 and len(context) == 1:
-                i = 0  # use same context for each block
-            x = block(x, context=context[i])
+            # 不需要再按索引取 context[i] 了，直接传递字典
+            x = block(x, context=context) # <<<--- 传递字典
+        # --- 修改结束 ---
+
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
         return x + x_in
-
 
 class SimpleTransformer(nn.Module):
     def __init__(
@@ -757,3 +753,125 @@ class SimpleTransformer(nn.Module):
         for layer in self.layers:
             x = layer(x, context)
         return x
+
+# --- 1. 修改 BasicTransformerBlock ---
+class BasicTransformerBlockWithHifiVFSContext(nn.Module):
+    """
+    修改后的 BasicTransformerBlock，用于处理包含 'crossattn' 和 'f_attr_tokens' 的 context 字典。
+    """
+    ATTENTION_MODES = {
+        "softmax": CrossAttention,
+        "softmax-xformers": MemoryEfficientCrossAttention,
+    }
+
+    def __init__(
+        self,
+        dim,
+        n_heads,
+        d_head,
+        dropout=0.0,
+        context_dim=None, # DIL context dim (e.g., 768)
+        f_attr_context_dim=None, # FAL context dim (e.g., 768 or 1280 if not projected)
+        gated_ff=True,
+        checkpoint=True,
+        disable_self_attn=False,
+        attn_mode="softmax",
+        sdp_backend=None, # 通常在 __init__ 中不直接使用，但在 forward 中可能影响 F.scaled_dot_product_attention
+    ):
+        super().__init__()
+        # --- 选择 Attention 实现 ---
+        attn_cls = self.ATTENTION_MODES.get(attn_mode)
+        if attn_cls is None or (attn_mode != "softmax" and not XFORMERS_IS_AVAILABLE):
+            if attn_mode != "softmax": logpy.warn(f"Attention mode '{attn_mode}' not available, falling back to softmax.")
+            attn_cls = CrossAttention # 使用内置的 scaled_dot_product
+            attn_mode = "softmax" # 标记使用内置 SDP
+
+        self.disable_self_attn = disable_self_attn
+        self.attn1 = attn_cls( # Self-Attention or Cross-Attention (if disable_self_attn)
+            query_dim=dim,
+            heads=n_heads,
+            dim_head=d_head,
+            dropout=dropout,
+            context_dim=context_dim if self.disable_self_attn else None, # 如果禁用自注意，则使用 DIL context
+            backend=sdp_backend if attn_mode=="softmax" else None # 传递 backend 给 softmax 实现
+        )
+        self.norm1 = nn.LayerNorm(dim)
+
+        # --- DIL Cross-Attention ---
+        self.attn_dil = attn_cls(
+            query_dim=dim,
+            context_dim=context_dim, # 使用 DIL context dim
+            heads=n_heads,
+            dim_head=d_head,
+            dropout=dropout,
+            backend=sdp_backend if attn_mode=="softmax" else None
+        )
+        self.norm_dil = nn.LayerNorm(dim)
+
+        # --- FAL Attribute Cross-Attention ---
+        # 如果提供了 f_attr context dim，则添加这一层
+        self.attn_fal = None
+        self.norm_fal = None
+        self.f_attr_context_dim = f_attr_context_dim
+        if self.f_attr_context_dim is not None:
+            self.attn_fal = attn_cls(
+                query_dim=dim,
+                context_dim=self.f_attr_context_dim, # 使用 FAL context dim
+                heads=n_heads,
+                dim_head=d_head,
+                dropout=dropout,
+                backend=sdp_backend if attn_mode=="softmax" else None
+            )
+            self.norm_fal = nn.LayerNorm(dim)
+            logpy.debug(f"BasicTransformerBlockWithHifiVFSContext: Added FAL Cross-Attention with context_dim={f_attr_context_dim}")
+
+
+        # --- FeedForward ---
+        self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+        self.norm_ff = nn.LayerNorm(dim) # 通常在 FF 之前加 Norm
+
+        self.checkpoint = checkpoint
+        if self.checkpoint:
+            logpy.debug(f"{self.__class__.__name__} is using checkpointing")
+
+    def forward(self, x: torch.Tensor, context: Optional[Dict] = None) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor (B, N, C).
+            context (Optional[Dict]): Conditioning dictionary. Expected keys:
+                                      'crossattn': DIL tokens (B, N_dil, C_dil).
+                                      'f_attr_tokens': FAL tokens (B, N_fal, C_fal). (Optional)
+        """
+        if self.checkpoint:
+            return checkpoint(self._forward, x, context, use_reentrant=False) # PyTorch >= 1.11 推荐 use_reentrant=False
+        else:
+            return self._forward(x, context)
+
+    def _forward(self, x: torch.Tensor, context: Optional[Dict] = None) -> torch.Tensor:
+        context = default(context, {}) # 确保 context 是字典
+
+        # --- 1. Self-Attention (or Cross-Attention if disable_self_attn) ---
+        attn1_context = context.get('crossattn') if self.disable_self_attn else None
+        x = self.attn1(self.norm1(x), context=attn1_context) + x
+
+        # --- 2. DIL Cross-Attention ---
+        dil_context = context.get('crossattn')
+        if dil_context is not None:
+             x = self.attn_dil(self.norm_dil(x), context=dil_context) + x
+        # else: # 如果没有 DIL context，可以选择跳过或报错
+        #     logger.warning("DIL context ('crossattn') not found in context dict.")
+
+        # --- 3. FAL Attribute Cross-Attention (if enabled) ---
+        if self.attn_fal is not None:
+            fal_context = context.get('f_attr_tokens')
+            if fal_context is not None:
+                 x = self.attn_fal(self.norm_fal(x), context=fal_context) + x
+            # else: # 如果没有 FAL context，可以选择跳过或报错
+            #     logger.warning("FAL context ('f_attr_tokens') not found in context dict.")
+
+
+        # --- 4. FeedForward ---
+        x = self.ff(self.norm_ff(x)) + x
+
+        return x
+

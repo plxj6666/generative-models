@@ -21,13 +21,13 @@ from scripts.demo.discretization import (
     Txt2NoisyDiscretizationWrapper,
 )
 from scripts.util.detection.nsfw_and_watermark_dectection import DeepFloydDataFiltering
-from sgm.inference.helpers import embed_watermark
-from sgm.modules.diffusionmodules.guiders import (
+from svd.sgm.inference.helpers import embed_watermark
+from svd.sgm.modules.diffusionmodules.guiders import (
     LinearPredictionGuider,
     TrianglePredictionGuider,
     VanillaCFG,
 )
-from sgm.modules.diffusionmodules.sampling import (
+from svd.sgm.modules.diffusionmodules.sampling import (
     DPMPP2MSampler,
     DPMPP2SAncestralSampler,
     EulerAncestralSampler,
@@ -35,7 +35,7 @@ from sgm.modules.diffusionmodules.sampling import (
     HeunEDMSampler,
     LinearMultistepSampler,
 )
-from sgm.util import append_dims, default, instantiate_from_config
+from svd.sgm.util import append_dims, default, instantiate_from_config
 from torch import autocast
 from torchvision import transforms
 from torchvision.utils import make_grid, save_image
@@ -237,7 +237,7 @@ def get_guider(options, key):
 
     if guider == "IdentityGuider":
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"
+            "target": "svd.sgm.modules.diffusionmodules.guiders.IdentityGuider"
         }
     elif guider == "VanillaCFG":
         scale = st.number_input(
@@ -247,7 +247,7 @@ def get_guider(options, key):
         )
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.VanillaCFG",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.VanillaCFG",
             "params": {
                 "scale": scale,
                 **additional_guider_kwargs,
@@ -267,7 +267,7 @@ def get_guider(options, key):
         )
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.LinearPredictionGuider",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.LinearPredictionGuider",
             "params": {
                 "max_scale": max_scale,
                 "min_scale": min_scale,
@@ -290,7 +290,7 @@ def get_guider(options, key):
         )
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.TrianglePredictionGuider",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.TrianglePredictionGuider",
             "params": {
                 "max_scale": max_scale,
                 "min_scale": min_scale,
@@ -364,7 +364,7 @@ def init_sampling(
 def get_discretization(discretization, options, key=1):
     if discretization == "LegacyDDPMDiscretization":
         discretization_config = {
-            "target": "sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization",
+            "target": "svd.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization",
         }
     elif discretization == "EDMDiscretization":
         sigma_min = st.sidebar.number_input(
@@ -375,7 +375,7 @@ def get_discretization(discretization, options, key=1):
         )  # 14.6146
         rho = st.sidebar.number_input(f"rho #{key}", value=options.get("rho", 3.0))
         discretization_config = {
-            "target": "sgm.modules.diffusionmodules.discretizer.EDMDiscretization",
+            "target": "svd.sgm.modules.diffusionmodules.discretizer.EDMDiscretization",
             "params": {
                 "sigma_min": sigma_min,
                 "sigma_max": sigma_max,

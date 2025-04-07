@@ -221,7 +221,7 @@ class VideoUNet(nn.Module):
                 use_spatial_context=use_spatial_context,
                 merge_strategy=merge_strategy,
                 merge_factor=merge_factor,
-                checkpoint=use_checkpoint,
+                use_checkpoint=use_checkpoint,
                 use_linear=use_linear_in_transformer,
                 attn_mode=spatial_transformer_attn_type,
                 disable_self_attn=disabled_sa,

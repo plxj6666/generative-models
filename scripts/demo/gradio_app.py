@@ -28,8 +28,8 @@ from scripts.sampling.simple_video_sample import (
     load_model,
 )
 from scripts.util.detection.nsfw_and_watermark_dectection import DeepFloydDataFiltering
-from sgm.inference.helpers import embed_watermark
-from sgm.util import default, instantiate_from_config
+from svd.sgm.inference.helpers import embed_watermark
+from svd.sgm.util import default, instantiate_from_config
 
 # To download all svd models
 # hf_hub_download(repo_id="stabilityai/stable-video-diffusion-img2vid-xt", filename="svd_xt.safetensors", local_dir="checkpoints")

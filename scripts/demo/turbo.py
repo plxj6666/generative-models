@@ -1,7 +1,7 @@
 from st_keyup import st_keyup
 from streamlit_helpers import *
 
-from sgm.modules.diffusionmodules.sampling import EulerAncestralSampler
+from svd.sgm.modules.diffusionmodules.sampling import EulerAncestralSampler
 
 VERSION2SPECS = {
     "SDXL-Turbo": {
@@ -200,7 +200,7 @@ if __name__ == "__main__":
         num_steps=1000,
         eta=1.0,
         discretization_config=dict(
-            target="sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization"
+            target="svd.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization"
         ),
     )
     sampler.n_sample_steps = n_steps

@@ -17,15 +17,15 @@ from torch import autocast
 from torchvision.transforms import ToTensor
 
 from scripts.util.detection.nsfw_and_watermark_dectection import DeepFloydDataFiltering
-from sgm.modules.autoencoding.temporal_ae import VideoDecoder
-from sgm.modules.diffusionmodules.guiders import (
+from svd.sgm.modules.autoencoding.temporal_ae import VideoDecoder
+from svd.sgm.modules.diffusionmodules.guiders import (
     LinearPredictionGuider,
     SpatiotemporalPredictionGuider,
     TrapezoidPredictionGuider,
     TrianglePredictionGuider,
     VanillaCFG,
 )
-from sgm.modules.diffusionmodules.sampling import (
+from svd.sgm.modules.diffusionmodules.sampling import (
     DPMPP2MSampler,
     DPMPP2SAncestralSampler,
     EulerAncestralSampler,
@@ -33,7 +33,7 @@ from sgm.modules.diffusionmodules.sampling import (
     HeunEDMSampler,
     LinearMultistepSampler,
 )
-from sgm.util import default, instantiate_from_config
+from svd.sgm.util import default, instantiate_from_config
 
 
 def load_module_gpu(model):
@@ -443,14 +443,14 @@ def init_embedder_options_no_st(keys, init_dict, prompt=None, negative_prompt=No
 def get_discretization_no_st(discretization, options, key=1):
     if discretization == "LegacyDDPMDiscretization":
         discretization_config = {
-            "target": "sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization",
+            "target": "svd.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization",
         }
     elif discretization == "EDMDiscretization":
         sigma_min = options.get("sigma_min", 0.03)
         sigma_max = options.get("sigma_max", 14.61)
         rho = options.get("rho", 3.0)
         discretization_config = {
-            "target": "sgm.modules.diffusionmodules.discretizer.EDMDiscretization",
+            "target": "svd.sgm.modules.diffusionmodules.discretizer.EDMDiscretization",
             "params": {
                 "sigma_min": sigma_min,
                 "sigma_max": sigma_max,
@@ -478,7 +478,7 @@ def get_guider_no_st(options, key):
 
     if guider == "IdentityGuider":
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"
+            "target": "svd.sgm.modules.diffusionmodules.guiders.IdentityGuider"
         }
     elif guider == "VanillaCFG":
         scale_schedule = "Identity"
@@ -487,7 +487,7 @@ def get_guider_no_st(options, key):
             scale = options.get("cfg", 5.0)
 
             scale_schedule_config = {
-                "target": "sgm.modules.diffusionmodules.guiders.IdentitySchedule",
+                "target": "svd.sgm.modules.diffusionmodules.guiders.IdentitySchedule",
                 "params": {"scale": scale},
             }
 
@@ -497,7 +497,7 @@ def get_guider_no_st(options, key):
             sigma_cutoff = 1.0
 
             scale_schedule_config = {
-                "target": "sgm.modules.diffusionmodules.guiders.OscillatingSchedule",
+                "target": "svd.sgm.modules.diffusionmodules.guiders.OscillatingSchedule",
                 "params": {
                     "small_scale": small_scale,
                     "large_scale": large_scale,
@@ -508,7 +508,7 @@ def get_guider_no_st(options, key):
             raise NotImplementedError
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.VanillaCFG",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.VanillaCFG",
             "params": {
                 "scale_schedule_config": scale_schedule_config,
                 **additional_guider_kwargs,
@@ -518,7 +518,7 @@ def get_guider_no_st(options, key):
         max_scale = options.get("cfg", 1.5)
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.LinearPredictionGuider",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.LinearPredictionGuider",
             "params": {
                 "max_scale": max_scale,
                 "num_frames": options["num_frames"],
@@ -531,7 +531,7 @@ def get_guider_no_st(options, key):
         period_fusing = options.get("period_fusing", "max")
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.TrianglePredictionGuider",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.TrianglePredictionGuider",
             "params": {
                 "max_scale": max_scale,
                 "num_frames": options["num_frames"],
@@ -545,7 +545,7 @@ def get_guider_no_st(options, key):
         edge_perc = options.get("edge_perc", 0.1)
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.TrapezoidPredictionGuider",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.TrapezoidPredictionGuider",
             "params": {
                 "max_scale": max_scale,
                 "num_frames": options["num_frames"],
@@ -557,7 +557,7 @@ def get_guider_no_st(options, key):
         max_scale = options.get("cfg", 1.5)
 
         guider_config = {
-            "target": "sgm.modules.diffusionmodules.guiders.SpatiotemporalPredictionGuider",
+            "target": "svd.sgm.modules.diffusionmodules.guiders.SpatiotemporalPredictionGuider",
             "params": {
                 "max_scale": max_scale,
                 "num_frames": options["num_frames"],

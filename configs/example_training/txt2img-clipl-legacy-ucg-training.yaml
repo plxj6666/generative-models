@@ -1,6 +1,6 @@
 model:
   base_learning_rate: 1.0e-4
-  target: sgm.models.diffusion.DiffusionEngine
+  target: svg.sgm.models.diffusion.DiffusionEngine
   params:
     scale_factor: 0.13025
     disable_first_stage_autocast: True
@@ -8,7 +8,7 @@ model:
       - txt
 
     scheduler_config:
-      target: sgm.lr_scheduler.LambdaLinearScheduler
+      target: svg.sgm.lr_scheduler.LambdaLinearScheduler
       params:
         warm_up_steps: [10000]
         cycle_lengths: [10000000000000]
@@ -17,17 +17,17 @@ model:
         f_min: [1.]
 
     denoiser_config:
-      target: sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
+      target: svg.sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
       params:
         num_idx: 1000
 
         scaling_config:
-          target: sgm.modules.diffusionmodules.denoiser_scaling.EpsScaling
+          target: svg.sgm.modules.diffusionmodules.denoiser_scaling.EpsScaling
         discretization_config:
-          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+          target: svg.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
 
     network_config:
-      target: sgm.modules.diffusionmodules.openaimodel.UNetModel
+      target: svg.sgm.modules.diffusionmodules.openaimodel.UNetModel
       params:
         use_checkpoint: True
         in_channels: 4
@@ -45,33 +45,33 @@ model:
         spatial_transformer_attn_type: softmax-xformers
 
     conditioner_config:
-      target: sgm.modules.GeneralConditioner
+      target: svg.sgm.modules.GeneralConditioner
       params:
         emb_models:
           - is_trainable: True
             input_key: txt
             ucg_rate: 0.1
             legacy_ucg_value: ""
-            target: sgm.modules.encoders.modules.FrozenCLIPEmbedder
+            target: svg.sgm.modules.encoders.modules.FrozenCLIPEmbedder
             params:
               always_return_pooled: True
 
           - is_trainable: False
             ucg_rate: 0.1
             input_key: original_size_as_tuple
-            target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+            target: svg.sgm.modules.encoders.modules.ConcatTimestepEmbedderND
             params:
               outdim: 256
 
           - is_trainable: False
             input_key: crop_coords_top_left
             ucg_rate: 0.1
-            target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+            target: svg.sgm.modules.encoders.modules.ConcatTimestepEmbedderND
             params:
               outdim: 256
 
     first_stage_config:
-      target: sgm.models.autoencoder.AutoencoderKL
+      target: svg.sgm.models.autoencoder.AutoencoderKL
       params:
         ckpt_path: CKPT_PATH
         embed_dim: 4
@@ -92,33 +92,33 @@ model:
           target: torch.nn.Identity
 
     loss_fn_config:
-      target: sgm.modules.diffusionmodules.loss.StandardDiffusionLoss
+      target: svg.sgm.modules.diffusionmodules.loss.StandardDiffusionLoss
       params:
         loss_weighting_config:
-          target: sgm.modules.diffusionmodules.loss_weighting.EpsWeighting
+          target: svg.sgm.modules.diffusionmodules.loss_weighting.EpsWeighting
         sigma_sampler_config:
-          target: sgm.modules.diffusionmodules.sigma_sampling.DiscreteSampling
+          target: svg.sgm.modules.diffusionmodules.sigma_sampling.DiscreteSampling
           params:
             num_idx: 1000
 
             discretization_config:
-              target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+              target: svg.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
 
     sampler_config:
-      target: sgm.modules.diffusionmodules.sampling.EulerEDMSampler
+      target: svg.sgm.modules.diffusionmodules.sampling.EulerEDMSampler
       params:
         num_steps: 50
 
         discretization_config:
-          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+          target: svg.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
 
         guider_config:
-          target: sgm.modules.diffusionmodules.guiders.VanillaCFG
+          target: svg.sgm.modules.diffusionmodules.guiders.VanillaCFG
           params:
             scale: 7.5
 
 data:
-  target: sgm.data.dataset.StableDataModuleFromConfig
+  target: svg.sgm.data.dataset.StableDataModuleFromConfig
   params:
     train:
       datapipeline:

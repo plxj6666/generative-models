@@ -15,7 +15,7 @@ from ...modules.diffusionmodules.sampling_utils import (get_ancestral_step,
                                                         to_sigma)
 from ...util import append_dims, default, instantiate_from_config
 
-DEFAULT_GUIDER = {"target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"}
+DEFAULT_GUIDER = {"target": "svd.sgm.modules.diffusionmodules.guiders.IdentityGuider"}
 
 
 class BaseDiffusionSampler:

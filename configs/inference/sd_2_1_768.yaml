@@ -1,21 +1,21 @@
 model:
-  target: sgm.models.diffusion.DiffusionEngine
+  target: svg.sgm.models.diffusion.DiffusionEngine
   params:
     scale_factor: 0.18215
     disable_first_stage_autocast: True
 
     denoiser_config:
-      target: sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
+      target: svg.sgm.modules.diffusionmodules.denoiser.DiscreteDenoiser
       params:
         num_idx: 1000
 
         scaling_config:
-          target: sgm.modules.diffusionmodules.denoiser_scaling.VScaling
+          target: svg.sgm.modules.diffusionmodules.denoiser_scaling.VScaling
         discretization_config:
-          target: sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
+          target: svg.sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization
 
     network_config:
-      target: sgm.modules.diffusionmodules.openaimodel.UNetModel
+      target: svg.sgm.modules.diffusionmodules.openaimodel.UNetModel
       params:
         use_checkpoint: True
         in_channels: 4
@@ -30,18 +30,18 @@ model:
         context_dim: 1024
 
     conditioner_config:
-      target: sgm.modules.GeneralConditioner
+      target: svg.sgm.modules.GeneralConditioner
       params:
         emb_models:
           - is_trainable: False
             input_key: txt
-            target: sgm.modules.encoders.modules.FrozenOpenCLIPEmbedder
+            target: svg.sgm.modules.encoders.modules.FrozenOpenCLIPEmbedder
             params:
               freeze: true
               layer: penultimate
 
     first_stage_config:
-      target: sgm.models.autoencoder.AutoencoderKL
+      target: svg.sgm.models.autoencoder.AutoencoderKL
       params:
         embed_dim: 4
         monitor: val/rec_loss

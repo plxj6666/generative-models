@@ -5,15 +5,15 @@ from typing import Optional
 
 from omegaconf import OmegaConf
 
-from sgm.inference.helpers import (Img2ImgDiscretizationWrapper, do_img2img,
+from svd.sgm.inference.helpers import (Img2ImgDiscretizationWrapper, do_img2img,
                                    do_sample)
-from sgm.modules.diffusionmodules.sampling import (DPMPP2MSampler,
+from svd.sgm.modules.diffusionmodules.sampling import (DPMPP2MSampler,
                                                    DPMPP2SAncestralSampler,
                                                    EulerAncestralSampler,
                                                    EulerEDMSampler,
                                                    HeunEDMSampler,
                                                    LinearMultistepSampler)
-from sgm.util import load_model_from_config
+from svd.sgm.util import load_model_from_config
 
 
 class ModelArchitecture(str, Enum):

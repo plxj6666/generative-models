@@ -51,7 +51,7 @@ class AbstractAutoencoder(pl.LightningModule):
             return
         if isinstance(ckpt, str):
             ckpt = {
-                "target": "sgm.modules.checkpoint.CheckpointEngine",
+                "target": "svd.sgm.modules.checkpoint.CheckpointEngine",
                 "params": {"ckpt_path": ckpt},
             }
         engine = instantiate_from_config(ckpt)
@@ -442,11 +442,11 @@ class AutoencodingEngineLegacy(AutoencodingEngine):
         ckpt_engine = kwargs.pop("ckpt_engine", None)
         super().__init__(
             encoder_config={
-                "target": "sgm.modules.diffusionmodules.model.Encoder",
+                "target": "svd.sgm.modules.diffusionmodules.model.Encoder",
                 "params": ddconfig,
             },
             decoder_config={
-                "target": "sgm.modules.diffusionmodules.model.Decoder",
+                "target": "svd.sgm.modules.diffusionmodules.model.Decoder",
                 "params": ddconfig,
             },
             **kwargs,
@@ -512,7 +512,7 @@ class AutoencoderKL(AutoencodingEngineLegacy):
         super().__init__(
             regularizer_config={
                 "target": (
-                    "sgm.modules.autoencoding.regularizers"
+                    "svd.sgm.modules.autoencoding.regularizers"
                     ".DiagonalGaussianRegularizer"
                 )
             },
@@ -534,7 +534,7 @@ class AutoencoderLegacyVQ(AutoencodingEngineLegacy):
         super().__init__(
             regularizer_config={
                 "target": (
-                    "sgm.modules.autoencoding.regularizers.quantize" ".VectorQuantizer"
+                    "svd.sgm.modules.autoencoding.regularizers.quantize" ".VectorQuantizer"
                 ),
                 "params": {
                     "n_e": n_embed,
@@ -606,7 +606,7 @@ class AutoencoderKLModeOnly(AutoencodingEngineLegacy):
         super().__init__(
             regularizer_config={
                 "target": (
-                    "sgm.modules.autoencoding.regularizers"
+                    "svd.sgm.modules.autoencoding.regularizers"
                     ".DiagonalGaussianRegularizer"
                 ),
                 "params": {"sample": False},

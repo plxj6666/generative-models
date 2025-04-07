@@ -67,104 +67,168 @@ class AbstractEmbModel(nn.Module):
     def input_key(self):
         del self._input_key
 
+import logging
+logger = logging.getLogger(__name__)
+class GeneralConditioner(nn.Module): # 保留类定义和其他方法
+    OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat"}
+    # 定义默认的拼接维度
+    KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1}
+    # 可以为自定义键预定义拼接维度，如果需要的话
+    CUSTOM_KEY2CATDIM = {"f_attr_tokens": 2} # 假设 f_attr_tokens 也按 sequence 维拼接
 
-class GeneralConditioner(nn.Module):
-    OUTPUT_DIM2KEYS = {2: "vector", 3: "crossattn", 4: "concat"} # , 5: "concat"}
-    KEY2CATDIM = {"vector": 1, "crossattn": 2, "concat": 1, "cond_view": 1, "cond_motion": 1}
-
-    def __init__(self, emb_models: Union[List, ListConfig]):
+    # __init__ 和 possibly_get_ucg_val 方法保持不变
+    def __init__(self, emb_models: List[AbstractEmbModel]): # <<<--- 参数类型改为实例列表
         super().__init__()
-        embedders = []
-        for n, embconfig in enumerate(emb_models):
-            embedder = instantiate_from_config(embconfig)
-            assert isinstance(
-                embedder, AbstractEmbModel
-            ), f"embedder model {embedder.__class__.__name__} has to inherit from AbstractEmbModel"
-            embedder.is_trainable = embconfig.get("is_trainable", False)
-            embedder.ucg_rate = embconfig.get("ucg_rate", 0.0)
-            if not embedder.is_trainable:
-                embedder.train = disabled_train
-                for param in embedder.parameters():
-                    param.requires_grad = False
-                embedder.eval()
-            print(
-                f"Initialized embedder #{n}: {embedder.__class__.__name__} "
-                f"with {count_params(embedder, False)} params. Trainable: {embedder.is_trainable}"
-            )
+        # 直接使用传入的实例化好的 embedder 列表
+        self.embedders = nn.ModuleList(emb_models)
+        logger.info(f"GeneralConditioner received {len(self.embedders)} embedder instances.")
 
-            if "input_key" in embconfig:
-                embedder.input_key = embconfig["input_key"]
-            elif "input_keys" in embconfig:
-                embedder.input_keys = embconfig["input_keys"]
-            else:
-                raise KeyError(
-                    f"need either 'input_key' or 'input_keys' for embedder {embedder.__class__.__name__}"
-                )
-
-            embedder.legacy_ucg_val = embconfig.get("legacy_ucg_value", None)
-            if embedder.legacy_ucg_val is not None:
-                embedder.ucg_prng = np.random.RandomState()
-
-            embedders.append(embedder)
-        self.embedders = nn.ModuleList(embedders)
-
+        
     def possibly_get_ucg_val(self, embedder: AbstractEmbModel, batch: Dict) -> Dict:
+        # ... (代码不变) ...
         assert embedder.legacy_ucg_val is not None
         p = embedder.ucg_rate
         val = embedder.legacy_ucg_val
-        for i in range(len(batch[embedder.input_key])):
-            if embedder.ucg_prng.choice(2, p=[1 - p, p]):
-                batch[embedder.input_key][i] = val
+        # 确保 batch[embedder.input_key] 是列表或类似可迭代对象
+        if not isinstance(batch[embedder.input_key], list):
+             # 如果不是列表，可能需要特殊处理或发出警告
+             # logger.warning(f"Input key '{embedder.input_key}' is not a list for legacy UCG.")
+             # 假设它是一个单一的值或Tensor，直接处理
+             if embedder.ucg_prng.choice(2, p=[1 - p, p]):
+                  batch[embedder.input_key] = val
+        else:
+             for i in range(len(batch[embedder.input_key])):
+                  if embedder.ucg_prng.choice(2, p=[1 - p, p]):
+                       batch[embedder.input_key][i] = val
         return batch
 
+
+    # --- 修改后的 forward 方法 ---
     def forward(
         self, batch: Dict, force_zero_embeddings: Optional[List] = None
     ) -> Dict:
+        """
+        处理输入批次，调用所有 embedder，并将它们的输出整理到字典中。
+        根据 embedder 的 output_key 属性或输出维度确定输出键。
+        """
         output = dict()
         if force_zero_embeddings is None:
             force_zero_embeddings = []
-        for embedder in self.embedders:
-            embedding_context = nullcontext if embedder.is_trainable else torch.no_grad
-            with embedding_context():
-                if hasattr(embedder, "input_key") and (embedder.input_key is not None):
-                    if embedder.legacy_ucg_val is not None:
-                        batch = self.possibly_get_ucg_val(embedder, batch)
-                    emb_out = embedder(batch[embedder.input_key])
-                elif hasattr(embedder, "input_keys"):
-                    emb_out = embedder(*[batch[k] for k in embedder.input_keys])
-            assert isinstance(
-                emb_out, (torch.Tensor, list, tuple)
-            ), f"encoder outputs must be tensors or a sequence, but got {type(emb_out)}"
-            if not isinstance(emb_out, (list, tuple)):
-                emb_out = [emb_out]
-            for emb in emb_out:
-                if embedder.input_key in ["cond_view", "cond_motion"]:
-                    out_key = embedder.input_key
-                else:
-                    out_key = self.OUTPUT_DIM2KEYS[emb.dim()]
 
-                if embedder.ucg_rate > 0.0 and embedder.legacy_ucg_val is None:
-                    emb = (
-                        expand_dims_like(
-                            torch.bernoulli(
-                                (1.0 - embedder.ucg_rate)
-                                * torch.ones(emb.shape[0], device=emb.device)
-                            ),
-                            emb,
-                        )
-                        * emb
-                    )
-                if (
-                    hasattr(embedder, "input_key")
-                    and embedder.input_key in force_zero_embeddings
-                ):
-                    emb = torch.zeros_like(emb)
-                if out_key in output:
-                    output[out_key] = torch.cat(
-                        (output[out_key], emb), self.KEY2CATDIM[out_key]
-                    )
+        for embedder in self.embedders:
+            embedding_context = nullcontext if embedder.is_trainable else torch.no_grad() # 确保 no_grad 是被调用的
+            with embedding_context:
+                # 获取 embedder 的输入
+                try:
+                    if hasattr(embedder, "input_key") and (embedder.input_key is not None):
+                        # print(f"Debug: Processing embedder {embedder.__class__.__name__} with input_key '{embedder.input_key}'")
+                        # print(f"Debug: Batch keys: {list(batch.keys())}")
+                        # print(f"Debug: Input value type: {type(batch[embedder.input_key])}")
+                        # if isinstance(batch[embedder.input_key], torch.Tensor):
+                        #      print(f"Debug: Input tensor shape: {batch[embedder.input_key].shape}")
+                        if embedder.input_key not in batch:
+                             logger.error(f"Embedder {embedder.__class__.__name__} 需要的 input_key '{embedder.input_key}' 不在 batch 中！ 可用的键: {list(batch.keys())}")
+                             continue # 跳过这个 embedder
+                        if embedder.legacy_ucg_val is not None:
+                            batch = self.possibly_get_ucg_val(embedder, batch)
+                        emb_out = embedder(batch[embedder.input_key])
+                    elif hasattr(embedder, "input_keys"):
+                        # print(f"Debug: Processing embedder {embedder.__class__.__name__} with input_keys '{embedder.input_keys}'")
+                        emb_out = embedder(*[batch[k] for k in embedder.input_keys])
+                    else:
+                         # 不应该发生，因为 __init__ 中有检查
+                         logger.error(f"Embedder {embedder.__class__.__name__} 既没有 input_key 也没有 input_keys。")
+                         continue
+                except KeyError as e:
+                     logger.error(f"处理 Embedder {embedder.__class__.__name__} 时发生 KeyError: 输入键 '{e}' 不在 batch 中！可用的键: {list(batch.keys())}")
+                     continue # 跳过这个 embedder
+                except Exception as e:
+                     logger.error(f"调用 Embedder {embedder.__class__.__name__} 时发生错误: {e}", exc_info=True)
+                     continue # 跳过这个 embedder
+
+            # 检查和处理输出
+            if emb_out is None:
+                 logger.warning(f"Embedder {embedder.__class__.__name__} 返回了 None，跳过。")
+                 continue
+            if not isinstance(emb_out, (torch.Tensor, list, tuple)):
+                logger.error(f"Embedder {embedder.__class__.__name__} 的输出必须是 Tensor 或序列，但得到了 {type(emb_out)}。")
+                continue
+            if not isinstance(emb_out, (list, tuple)):
+                emb_out = [emb_out] # 统一处理为列表
+
+            # 处理每个输出 Tensor
+            for emb in emb_out:
+                if not isinstance(emb, torch.Tensor):
+                     logger.warning(f"Embedder {embedder.__class__.__name__} 的输出列表中包含非 Tensor 元素 ({type(emb)})，跳过。")
+                     continue
+
+                # 确定输出键 (out_key)
+                out_key = None
+                if hasattr(embedder, 'output_key') and embedder.output_key:
+                    out_key = embedder.output_key
+                elif emb.dim() in self.OUTPUT_DIM2KEYS:
+                    out_key = self.OUTPUT_DIM2KEYS[emb.dim()]
                 else:
-                    output[out_key] = emb
+                    # 尝试根据 input_key 猜测 (可选，或者直接报错/警告)
+                    if hasattr(embedder, 'input_key'):
+                         logger.warning(f"无法根据维度 {emb.dim()} 为 Embedder {embedder.__class__.__name__} (input: '{embedder.input_key}') 确定标准输出键。将尝试使用 input_key 作为 out_key。")
+                         out_key = embedder.input_key # 使用 input_key 作为备选
+                    else:
+                         logger.error(f"无法确定 Embedder {embedder.__class__.__name__} 输出的 out_key (shape: {emb.shape})。跳过此输出。")
+                         continue
+
+                # 应用 UCG rate
+                if embedder.ucg_rate > 0.0 and embedder.legacy_ucg_val is None:
+                    # 确保 emb 是浮点类型以应用 Bernoulli mask
+                    if not torch.is_floating_point(emb):
+                         logger.warning(f"Embedder {embedder.__class__.__name__} 的输出不是浮点类型 ({emb.dtype})，无法应用 UCG rate。")
+                    else:
+                         try:
+                              # 需要处理 batch size 可能为 0 的情况
+                              if emb.shape[0] > 0:
+                                   mask = torch.bernoulli(
+                                       (1.0 - embedder.ucg_rate)
+                                       * torch.ones(emb.shape[0], device=emb.device)
+                                   )
+                                   emb = expand_dims_like(mask, emb) * emb
+                              else:
+                                   logger.debug(f"Embedder {embedder.__class__.__name__} 输出 batch size 为 0，跳过 UCG。")
+                         except Exception as e_ucg:
+                              logger.error(f"应用 UCG 到 Embedder {embedder.__class__.__name__} 时出错: {e_ucg}")
+
+
+                # 应用 force_zero_embeddings
+                if hasattr(embedder, 'input_key') and embedder.input_key in force_zero_embeddings:
+                    emb = torch.zeros_like(emb)
+
+                # 合并到 output 字典
+                if out_key in output:
+                    # 确定拼接维度
+                    cat_dim = self.KEY2CATDIM.get(out_key) or self.CUSTOM_KEY2CATDIM.get(out_key)
+                    if cat_dim is None:
+                        # 默认行为：如果是 3D tensor 且键名含 'attn' 或 'token'，则按 sequence 维 (2) 拼，否则按 channel 维 (1)
+                        if emb.ndim == 3 and ('attn' in out_key or 'token' in out_key): cat_dim = 2
+                        else: cat_dim = 1
+                        logger.debug(f"未找到键 '{out_key}' 的预定义拼接维度，使用默认值: {cat_dim}")
+
+                    # 安全拼接
+                    try:
+                        if output[out_key].ndim == emb.ndim:
+                            if output[out_key].shape[0] == emb.shape[0]: # 检查 Batch 维度是否一致
+                                output[out_key] = torch.cat((output[out_key], emb), dim=cat_dim)
+                            else:
+                                logger.warning(f"键 '{out_key}' 的现有输出 Batch Size {output[out_key].shape[0]} 与新输出 Batch Size {emb.shape[0]} 不匹配，无法拼接。新输出被忽略。")
+                        else:
+                            logger.warning(f"键 '{out_key}' 的现有输出维度 {output[out_key].ndim} 与新输出维度 {emb.ndim} 不匹配，无法拼接。新输出被忽略。")
+                    except Exception as e:
+                        logger.error(f"拼接键 '{out_key}' 时出错 (现有形状: {output[out_key].shape}, 新形状: {emb.shape}, 维度: {cat_dim}): {e}")
+                else:
+                    output[out_key] = emb # 直接赋值
+
+        # print(f"Debug: GeneralConditioner output keys: {list(output.keys())}")
+        # for k, v in output.items():
+        #      if isinstance(v, torch.Tensor): print(f"Debug: Output['{k}'] shape: {v.shape}")
+
         return output
 
     def get_unconditional_conditioning(

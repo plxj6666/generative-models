@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from packaging import version
 
-OPENAIUNETWRAPPER = "sgm.modules.diffusionmodules.wrappers.OpenAIWrapper"
+OPENAIUNETWRAPPER = "svd.sgm.modules.diffusionmodules.wrappers.OpenAIWrapper"
 
 
 class IdentityWrapper(nn.Module):

@@ -3,7 +3,7 @@ N_VIEW: 8
 N_FRAMES: 40
 
 model:
-  target: sgm.models.diffusion.DiffusionEngine
+  target: svd.sgm.models.diffusion.DiffusionEngine
   params:
     scale_factor: 0.18215
     en_and_decode_n_samples_a_time: 7
@@ -11,13 +11,13 @@ model:
     ckpt_path: checkpoints/sv4d.safetensors
 
     denoiser_config:
-      target: sgm.modules.diffusionmodules.denoiser.Denoiser
+      target: svd.sgm.modules.diffusionmodules.denoiser.Denoiser
       params:
         scaling_config:
-          target: sgm.modules.diffusionmodules.denoiser_scaling.VScalingWithEDMcNoise
+          target: svd.sgm.modules.diffusionmodules.denoiser_scaling.VScalingWithEDMcNoise
 
     network_config:
-      target: sgm.modules.diffusionmodules.video_model.SpatialUNetModelWithTime
+      target: svd.sgm.modules.diffusionmodules.video_model.SpatialUNetModelWithTime
       params:
         adm_in_channels: 1280
         attention_resolutions: [4, 2, 1]
@@ -45,30 +45,30 @@ model:
         use_motion_attention: True
 
     conditioner_config:
-      target: sgm.modules.GeneralConditioner
+      target: svd.sgm.modules.GeneralConditioner
       params:
         emb_models:
 
         - input_key: cond_frames_without_noise
-          target: sgm.modules.encoders.modules.FrozenOpenCLIPImagePredictionEmbedder
+          target: svd.sgm.modules.encoders.modules.FrozenOpenCLIPImagePredictionEmbedder
           is_trainable: False
           params:
             n_cond_frames: ${N_TIME}
             n_copies: 1
             open_clip_embedding_config:
-              target: sgm.modules.encoders.modules.FrozenOpenCLIPImageEmbedder
+              target: svd.sgm.modules.encoders.modules.FrozenOpenCLIPImageEmbedder
               params:
                 freeze: True
 
         - input_key: cond_frames
-          target: sgm.modules.encoders.modules.VideoPredictionEmbedderWithEncoder
+          target: svd.sgm.modules.encoders.modules.VideoPredictionEmbedderWithEncoder
           is_trainable: False
           params:
             is_ae: True
             n_cond_frames: ${N_FRAMES}
             n_copies: 1
             encoder_config:
-              target: sgm.models.autoencoder.AutoencoderKLModeOnly
+              target: svd.sgm.models.autoencoder.AutoencoderKLModeOnly
               params:
                 ddconfig:
                   attn_resolutions: []
@@ -87,30 +87,30 @@ model:
                   target: torch.nn.Identity
                 monitor: val/rec_loss
             sigma_cond_config:
-              target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+              target: svd.sgm.modules.encoders.modules.ConcatTimestepEmbedderND
               params:
                 outdim: 256
             sigma_sampler_config:
-              target: sgm.modules.diffusionmodules.sigma_sampling.ZeroSampler
+              target: svd.sgm.modules.diffusionmodules.sigma_sampling.ZeroSampler
 
         - input_key: polar_rad
           is_trainable: False
-          target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+          target: svd.sgm.modules.encoders.modules.ConcatTimestepEmbedderND
           params:
             outdim: 512
 
         - input_key: azimuth_rad
           is_trainable: False
-          target: sgm.modules.encoders.modules.ConcatTimestepEmbedderND
+          target: svd.sgm.modules.encoders.modules.ConcatTimestepEmbedderND
           params:
             outdim: 512
 
         - input_key: cond_view
           is_trainable: False
-          target: sgm.modules.encoders.modules.VideoPredictionEmbedderWithEncoder
+          target: svd.sgm.modules.encoders.modules.VideoPredictionEmbedderWithEncoder
           params:
             encoder_config:
-              target: sgm.models.autoencoder.AutoencoderKLModeOnly
+              target: svd.sgm.models.autoencoder.AutoencoderKLModeOnly
               params:
                 embed_dim: 4
                 monitor: val/rec_loss
@@ -132,17 +132,17 @@ model:
             n_cond_frames: ${N_VIEW}
             n_copies: 1
             sigma_sampler_config:
-              target: sgm.modules.diffusionmodules.sigma_sampling.ZeroSampler
+              target: svd.sgm.modules.diffusionmodules.sigma_sampling.ZeroSampler
 
         - input_key: cond_motion
           is_trainable: False
-          target: sgm.modules.encoders.modules.VideoPredictionEmbedderWithEncoder
+          target: svd.sgm.modules.encoders.modules.VideoPredictionEmbedderWithEncoder
           params:
             is_ae: True
             n_cond_frames: ${N_TIME}
             n_copies: 1
             encoder_config:
-              target: sgm.models.autoencoder.AutoencoderKLModeOnly
+              target: svd.sgm.models.autoencoder.AutoencoderKLModeOnly
               params:
                 embed_dim: 4
                 monitor: val/rec_loss
@@ -161,19 +161,19 @@ model:
                 lossconfig:
                   target: torch.nn.Identity
             sigma_sampler_config:
-              target: sgm.modules.diffusionmodules.sigma_sampling.ZeroSampler
+              target: svd.sgm.modules.diffusionmodules.sigma_sampling.ZeroSampler
 
     first_stage_config:
-      target: sgm.models.autoencoder.AutoencodingEngine
+      target: svd.sgm.models.autoencoder.AutoencodingEngine
       params:
         loss_config:
           target: torch.nn.Identity
         regularizer_config:
-          target: sgm.modules.autoencoding.regularizers.DiagonalGaussianRegularizer
+          target: svd.sgm.modules.autoencoding.regularizers.DiagonalGaussianRegularizer
         encoder_config:
           target: torch.nn.Identity
         decoder_config:
-          target: sgm.modules.diffusionmodules.model.Decoder
+          target: svd.sgm.modules.diffusionmodules.model.Decoder
           params:
             attn_resolutions: []
             attn_type: vanilla-xformers
@@ -188,14 +188,14 @@ model:
             z_channels: 4
 
     sampler_config:
-      target: sgm.modules.diffusionmodules.sampling.EulerEDMSampler
+      target: svd.sgm.modules.diffusionmodules.sampling.EulerEDMSampler
       params:
         discretization_config:
-          target: sgm.modules.diffusionmodules.discretizer.EDMDiscretization
+          target: svd.sgm.modules.diffusionmodules.discretizer.EDMDiscretization
           params:
             sigma_max: 500.0
         guider_config:
-          target: sgm.modules.diffusionmodules.guiders.LinearPredictionGuider
+          target: svd.sgm.modules.diffusionmodules.guiders.LinearPredictionGuider
           params:
             max_scale: 2.5
             num_frames: ${N_FRAMES}

@@ -165,15 +165,36 @@ def count_params(model, verbose=False):
     return total_params
 
 
-def instantiate_from_config(config):
-    if not "target" in config:
-        if config == "__is_first_stage__":
-            return None
-        elif config == "__is_unconditional__":
-            return None
-        raise KeyError("Expected key `target` to instantiate.")
-    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+def instantiate_from_config(config, **kwargs): # <<<--- 添加 **kwargs
+    """
+    Instantiates an object from a configuration dictionary.
 
+    Args:
+        config (Dict): Configuration dictionary with 'target' and optional 'params'.
+        **kwargs: Additional keyword arguments to pass to the object's constructor,
+                  overriding or supplementing params from the config.
+
+    Returns:
+        object: The instantiated object.
+    """
+    if config is None: # 处理 config 为 None 的情况
+         # logger.warning("instantiate_from_config received None config, returning None.")
+         return None
+    if not isinstance(config, dict): # 确保是字典
+         raise TypeError(f"config must be a dictionary, got {type(config)}")
+    if not "target" in config:
+        # 处理特殊标记 (保持不变)
+        if config == "__is_first_stage__": return None
+        elif config == "__is_unconditional__": return None
+        raise KeyError("Expected key `target` to instantiate.")
+
+    # 合并 config 中的 params 和额外的 kwargs
+    # kwargs 中的值会覆盖 config['params'] 中的同名键
+    params = config.get("params", dict())
+    params.update(kwargs) # <<<--- 将额外的 kwargs 合并到 params 中
+
+    # 使用更新后的 params 进行实例化
+    return get_obj_from_str(config["target"])(**params)
 
 def get_obj_from_str(string, reload=False, invalidate_cache=True):
     module, cls = string.rsplit(".", 1)
