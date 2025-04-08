@@ -15,7 +15,7 @@ from ...modules.diffusionmodules.util import (avg_pool_nd, conv_nd, linear,
                                               timestep_embedding, zero_module)
 from ...modules.video_attention import SpatialVideoTransformer
 from ...util import exists
-
+from typing import Dict
 logpy = logging.getLogger(__name__)
 
 
@@ -73,7 +73,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         self,
         x: th.Tensor,
         emb: th.Tensor,
-        context: Optional[th.Tensor] = None,
+        context: Optional[Dict] = None,
         image_only_indicator: Optional[th.Tensor] = None,
         cond_view: Optional[th.Tensor] = None,
         cond_motion: Optional[th.Tensor] = None,
@@ -82,59 +82,38 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
         time_step: Optional[int] = None,
         name: Optional[str] = None,
     ):
-        from ...modules.diffusionmodules.video_model import VideoResBlock, PostHocResBlockWithTime
-        from ...modules.spacetime_attention import (
-            BasicTransformerTimeMixBlock,
-            PostHocSpatialTransformerWithTimeMixing,
-            PostHocSpatialTransformerWithTimeMixingAndMotion
-        )
+        try:
+             from svd.sgm.modules.diffusionmodules.video_model import VideoResBlock, PostHocResBlockWithTime
+             from svd.sgm.modules.video_attention import SpatialVideoTransformer
+             from svd.sgm.modules.attention import SpatialTransformer
+             # from ....hifivfs_attention import BasicTransformerBlockWithHifiVFSContext # 可能需要导入
+        except ImportError as e: print('openai导入库失败'); raise
 
         for layer in self:
-            module = layer
-
-            if isinstance(
-                module,
-                (
-                    BasicTransformerTimeMixBlock,
-                    PostHocSpatialTransformerWithTimeMixing,
-                    PostHocSpatialTransformerWithTimeMixingAndMotion
-                ),
-            ):
-                x = layer(
-                    x,
-                    context,
-                    # cam,
-                    time_context,
-                    num_video_frames,
-                    image_only_indicator,
-                    cond_view,
-                    cond_motion,
-                    time_step,
-                    name,
-                )
-            elif isinstance(module, SpatialVideoTransformer):
-                x = layer(
-                    x,
-                    context,
-                    time_context,
-                    num_video_frames,
-                    image_only_indicator,
-                    # time_step,
-                )
-            elif isinstance(module, PostHocResBlockWithTime):
-                x = layer(x, emb, num_video_frames, image_only_indicator)
-            elif isinstance(module, VideoResBlock):
-                x = layer(x, emb, num_video_frames, image_only_indicator)
-            elif isinstance(module, TimestepBlock) and not isinstance(
-                module, VideoResBlock
-            ):
+            # --- 调整检查顺序 ---
+            if isinstance(layer, VideoResBlock) or isinstance(layer, PostHocResBlockWithTime): # ResBlock 优先
+                logpy.debug(f"[TimestepEmbedSequential -> VideoResBlock] Passing num_video_frames = {num_video_frames}")
+                x = layer(x, emb, num_video_frames=num_video_frames, image_only_indicator=image_only_indicator)
+            elif isinstance(layer, SpatialVideoTransformer): # <<<--- 先检查 SpatialVideoTransformer
+                 logpy.debug(f"[TimestepEmbedSequential -> SpatialVideoTransformer] Passing context type: {type(context)}, timesteps={num_video_frames}")
+                 x = layer(x, context=context, # <<<--- 传递字典
+                           time_context=time_context,
+                           timesteps=num_video_frames,
+                           image_only_indicator=image_only_indicator)
+            # elif 'BasicTransformerBlockWithHifiVFSContext' in str(type(layer)): # <<<--- 检查修改后的 Block (如果直接使用)
+            #      logger.debug(f"[TimestepEmbedSequential -> BasicTransformerBlockWithHifiVFSContext] Passing context type: {type(context)}")
+            #      x = layer(x, context=context)
+            elif isinstance(layer, SpatialTransformer): # <<<--- 再检查原版 SpatialTransformer
+                 # 只有当 layer 是 SpatialTransformer 但不是 SpatialVideoTransformer 时才会执行这里
+                 sp_context = context.get('crossattn') if isinstance(context, dict) else context
+                 logpy.debug(f"[TimestepEmbedSequential -> SpatialTransformer (Base)] Passing context type: {type(sp_context)}")
+                 x = layer(x, context=sp_context) # <<<--- 传递 Tensor 或 None
+            elif isinstance(layer, TimestepBlock): # 其他 TimestepBlock
                 x = layer(x, emb)
-            elif isinstance(module, SpatialTransformer):
-                x = layer(x, context)
-            else:
+            else: # 其他普通层
                 x = layer(x)
+            # --- 调整结束 ---
         return x
-
 
 class Upsample(nn.Module):
     """

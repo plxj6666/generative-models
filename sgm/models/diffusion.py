@@ -14,7 +14,7 @@ import logging
 import numpy as np  
 import torch.nn as nn
 from ..modules.encoders.modules import AbstractEmbModel # <--- 顶部的导入仍然需要
-
+from ..modules.diffusionmodules.denoiser import DiscreteDenoiser
 import sys
 from pathlib import Path
 
@@ -122,6 +122,33 @@ class DiffusionEngine(pl.LightningModule):
         if self.use_ema: self.model_ema = LitEma(self.model, decay=ema_decay_rate); logger.info(f"Keeping EMAs of {len(list(self.model_ema.buffers()))}.")
         self.scale_factor = scale_factor; self.disable_first_stage_autocast = disable_first_stage_autocast; self.no_cond_log = no_cond_log; self.en_and_decode_n_samples_a_time = en_and_decode_n_samples_a_time; self.scheduler_config = scheduler_config
 
+        # --- f_low 注入和投影层初始化 ---
+        self.f_low_injection = f_low_injection
+        self.f_low_proj_layer = None
+        if self.f_low_injection:
+             # --- 获取 VAE latent 通道数 (通常是 4) ---
+             # 尝试从 VAE 配置获取
+             vae_latent_channels = first_stage_config.get('params',{}).get('ddconfig',{}).get('z_channels', 4)
+             # --- 获取 f_low 通道数 (来自 AttributeEncoder，硬编码或从配置读取) ---
+             # 假设 f_low 通道固定为 320 (根据 encoder.py)
+             f_low_channels = 320
+             if attribute_encoder_instance is not None:
+                  # (可选) 尝试从实例获取，如果 Encoder 有属性的话
+                  # f_low_channels = getattr(attribute_encoder_instance, 'output_low_channels', 320)
+                  pass
+
+             if f_low_channels != vae_latent_channels:
+                  logger.info(f"Initializing 1x1 Conv layer to project f_low from {f_low_channels} to {vae_latent_channels} channels.")
+                  self.f_low_proj_layer = nn.Conv2d(
+                      in_channels=f_low_channels,
+                      out_channels=vae_latent_channels,
+                      kernel_size=1
+                  )
+                  # 这个投影层是否需要训练？通常需要，将其参数添加到优化器
+                  # (configure_optimizers 会自动处理，因为它是 self 的属性)
+             else:
+                  logger.info(f"f_low channels ({f_low_channels}) match VAE latent channels ({vae_latent_channels}). No projection needed.")
+        # --- 初始化结束 ---
 
         # --- 直接使用传入的实例 ---
         self.attribute_encoder = attribute_encoder_instance
@@ -359,14 +386,37 @@ class DiffusionEngine(pl.LightningModule):
         """
         loss_dict = {}
         # 1. 采样时间和噪声
-        t = torch.randint(0, self.denoiser.num_timesteps, (x.shape[0],), device=self.device).long()
+        # 1. 采样时间步 t
+        num_train_timesteps = 1000 # 默认或从配置获取
+        try:
+             if isinstance(self.denoiser, DiscreteDenoiser): num_train_timesteps = self.denoiser.num_idx
+             elif hasattr(self.loss_fn, "sigma_sampler") and hasattr(self.loss_fn.sigma_sampler, "num_steps"): num_train_timesteps = self.loss_fn.sigma_sampler.num_steps
+             else: logger.warning(...)
+        except AttributeError: logger.warning(...)
+
+        t = torch.randint(0, num_train_timesteps, (x.shape[0],), device=self.device).long()
+
+        # --- 修改：获取 sigma_t ---
+        try:
+             # 优先尝试 DiscreteDenoiser 的方法
+             if isinstance(self.denoiser, DiscreteDenoiser):
+                  sigmas_t = self.denoiser.idx_to_sigma(t) # <<<--- 使用 idx_to_sigma
+             # 备选：如果 loss_fn 有 sigma_sampler 且能根据 t 获取 sigma (不常见)
+             # elif hasattr(self.loss_fn, "sigma_sampler") and hasattr(self.loss_fn.sigma_sampler, "get_sigmas"):
+             #      sigmas_t = self.loss_fn.sigma_sampler.get_sigmas(t)
+             # 最后的备选：直接使用 loss_fn.sigma_sampler 采样，但这可能与 t 不对应
+             elif hasattr(self.loss_fn, "sigma_sampler"):
+                 logger.warning("Using sigmas sampled by loss_fn.sigma_sampler, may not correspond to t.")
+                 sigmas_t = self.loss_fn.sigma_sampler(x.shape[0]).to(x.device) # 重新采样
+             else:
+                  raise RuntimeError("Cannot determine sigma from t.")
+        except Exception as e_sigma:
+             logger.error(f"获取 sigma_t 失败: {e_sigma}. 无法继续。")
+             return torch.tensor(0.0, device=self.device, requires_grad=True), loss_dict
+        # --- 修改结束 ---
         noise = torch.randn_like(x)
 
         # 2. 计算加噪输入 xt
-        # 注意：denoiser.q_sample 可能未定义，通常在 sampler 或 scheduler 中
-        # 假设 denoiser 有方法获取 sqrt_alphas_cumprod 等
-        # 或者直接使用 sigma 计算：xt = x + noise * sigma
-        sigmas_t = self.denoiser.sigma(t) # 获取 sigma
         sigmas_bc = append_dims(sigmas_t, x.ndim)
         xt = x + noise * sigmas_bc # 直接使用 sigma 加噪 (对应 VE SDE 或简化的 VP)
 
@@ -382,42 +432,72 @@ class DiffusionEngine(pl.LightningModule):
         c = batch.get("c", {}) # 假设条件在 batch 中准备好
         uc = batch.get("uc", {}) # 假设 UC 在 batch 中准备好
 
-
+                # --- 修改：从原始 batch 数据获取 num_frames ---
+        # --- 修改：强制从 batch 获取 num_frames ---
+        num_frames = batch.get('num_video_frames')
+        if num_frames is None:
+             logger.error("Batch is missing the required key 'num_video_frames'!")
+             # 你需要确定 Dataset 确实返回了这个键
+             # 返回错误，训练无法继续
+             return torch.tensor(0.0, device=self.device, requires_grad=True), loss_dict
+        # 确保 num_frames 是 Python int (如果 Dataset 返回 Tensor 的话)
+        if isinstance(num_frames, torch.Tensor):
+             num_frames = num_frames.item() # 或者 .tolist()[0] 取决于形状
+        logger.debug(f"[DiffusionEngine.forward] Got num_frames = {num_frames} from batch.")
+        if num_frames is None: logger.error(...); return ...
+        logger.debug(f"[DiffusionEngine.forward] Determined num_frames = {num_frames}")
+        
         # 4. 处理 f_low 注入 (如果启用)
         model_input = xt
-        f_low = None
         if self.f_low_injection and self.attribute_encoder is not None:
-            # 提取原始 x (vt_latent) 的 f_low
-            # 使用 torch.no_grad() 以避免 f_low 计算影响主模型梯度 (除非 Eattr 浅层也训练)
-            with torch.no_grad() if not self.attribute_encoder.training else contextmanager(lambda: iter([None]))():
+            f_low = None # 初始化 f_low
+            # 使用 no_grad 计算 f_low，因为我们通常不希望 f_low 注入影响 Eattr 梯度
+            # 如果 Eattr 浅层也需要训练，需要移除 no_grad
+            with torch.no_grad(): # <<<--- 推荐使用 no_grad 计算 f_low
                 try:
-                    # 确保输入维度正确
                     if x.ndim == 4:
-                         _, f_low = self.attribute_encoder(x)
-                    else:
-                         logger.warning(f"计算 f_low 时输入 x 维度 ({x.ndim}) 非 4D，跳过。")
-                except Exception as e_flow:
-                    logger.warning(f"计算 f_low 失败: {e_flow}", exc_info=True)
-                    f_low = None
+                        _, f_low = self.attribute_encoder(x) # (B*T, 320, H, W)
+                    else: logger.warning(...)
+                except Exception as e_flow: logger.warning(...); f_low = None
 
-            # 注入 f_low 到 noisy input xt
             if f_low is not None:
-                if model_input.shape == f_low.shape:
-                    model_input = model_input + f_low
-                    # logger.debug("f_low 已添加到 U-Net 输入。")
+                # --- 应用投影层 (如果存在) ---
+                if self.f_low_proj_layer is not None:
+                    try:
+                        # 投影层也应该在 no_grad 上下文中，除非你想训练它
+                        # 但通常 f_low 注入的目的是提供信息，不参与梯度
+                        f_low_projected = self.f_low_proj_layer(f_low) # (B*T, 4, H, W)
+                        logger.debug(f"Projected f_low shape: {f_low_projected.shape}")
+                    except Exception as e_proj:
+                        logger.error(f"Failed to project f_low: {e_proj}", exc_info=True)
+                        f_low_projected = None
                 else:
-                    logger.warning(f"model_input ({model_input.shape}) 和 f_low ({f_low.shape}) 形状不匹配，无法注入 f_low。")
+                    # 如果不需要投影 (通道数已匹配)
+                    f_low_projected = f_low
+                # --- 投影结束 ---
 
-        # 5. U-Net Denoiser 前向传播，获取预测的 x_0 (x_pred)
+                # --- 注入投影后的 f_low ---
+                if f_low_projected is not None:
+                    if model_input.shape == f_low_projected.shape:
+                        model_input = model_input + f_low_projected # <<<--- 使用投影后的 f_low
+                        logger.debug("Projected f_low added to U-Net input.")
+                    else:
+                        # 检查通道数和空间尺寸
+                        if model_input.shape[1] != f_low_projected.shape[1]:
+                             logger.warning(f"Model input channels ({model_input.shape[1]}) and projected f_low channels ({f_low_projected.shape[1]}) mismatch after projection! Cannot inject.")
+                        elif model_input.shape[2:] != f_low_projected.shape[2:]:
+                             logger.warning(f"Model input spatial size ({model_input.shape[2:]}) and projected f_low ({f_low_projected.shape[2:]}) mismatch! Cannot inject.")
+                        else: # 其他未知形状问题
+                             logger.warning(f"Model input shape ({model_input.shape}) and projected f_low shape ({f_low_projected.shape}) mismatch! Cannot inject.")
+                # --- 注入结束 ---
+        # --- U-Net 调用 (现在不需要 additional_model_inputs 字典了) ---
         try:
-            # *** 关键：确认 denoiser 输入/输出 和 model 输入/输出 ***
-            # denoiser(network, input, sigma, cond, **additional_model_inputs)
-            # network(input * c_in, c_noise, cond, **additional_model_inputs)
-            # 返回 network_output * c_out + input * c_skip  (这就是 x_pred)
-            x_pred = self.denoiser(self.model, model_input, sigmas_t, cond=c)
+            x_pred = self.denoiser(self.model, model_input, sigmas_t, cond=c,
+                                   num_video_frames=num_frames) # <<<--- 直接传递显式参数
+            # --- 修改结束 ---
         except Exception as e_unet:
              logger.error(f"U-Net/Denoiser 前向传播失败: {e_unet}", exc_info=True)
-             return torch.tensor(0.0, device=self.device, requires_grad=True), loss_dict # 返回零损失
+             return torch.tensor(0.0, device=self.device, requires_grad=True), loss_dict
 
         # 6. 计算核心 LDM 损失
         ldm_loss_mean = torch.tensor(0.0, device=self.device)
@@ -584,36 +664,70 @@ class DiffusionEngine(pl.LightningModule):
 
     def shared_step(self, batch: Dict) -> Any:
         """准备数据并调用 forward 计算损失"""
-        # 1. 获取 VAE latent 输入 x
+        # 1. 获取 VAE latent 输入 x (来自 dataset 的 'vt')
         try:
-            x = self.get_input(batch) # get_input 内部处理了维度合并
-        except ValueError as e:
-            logger.error(f"获取输入失败: {e}")
-            return torch.tensor(0.0, device=self.device), {}
-        except KeyError as e:
-            logger.error(f"获取输入失败: 输入键 '{e}' 不在 batch 中。可用键: {list(batch.keys())}")
-            return torch.tensor(0.0, device=self.device), {}
+            x_orig_shape = batch[self.input_key].shape # 记录原始形状 (B, T, C, H, W)
+            x = self.get_input(batch) # get_input 应该返回 (B*T, C, H, W)
+            if not (x.ndim == 4 and x.shape[0] == x_orig_shape[0] * x_orig_shape[1]):
+                 logger.warning(f"get_input 返回的形状 ({x.shape}) 可能不符合预期的 B*T 格式 (原始: {x_orig_shape})")
+                 # 根据需要添加错误处理或 reshape
+                 if x.ndim == 5 and x.shape[0] == x_orig_shape[0] and x.shape[1] == x_orig_shape[1]:
+                      x = x.view(-1, *x.shape[2:]) # 手动 reshape
+                 else:
+                      raise ValueError("无法将输入 reshape 为 (B*T, C, H, W)")
 
+        except ValueError as e: logger.error(f"获取或 reshape 输入失败: {e}"); return torch.tensor(0.0, device=self.device), {}
+        except KeyError as e: logger.error(f"获取输入失败: 输入键 '{e}' 不在 batch 中。"); return torch.tensor(0.0, device=self.device), {}
 
-        # 2. 获取条件 c 和 uc
-        #    注意：Conditioner 需要完整的 batch 字典
+        # 2. --- 修改：确保 batch 中其他需要 Embedder 处理的数据也被 reshape ---
+        batch_for_cond = {}
+        batch_size = x_orig_shape[0] # B
+        num_frames = x_orig_shape[1] # T
+
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                # 如果是 5D 张量 (B, T, ...)， reshape 成 (B*T, ...)
+                if value.ndim == 5 and value.shape[0] == batch_size and value.shape[1] == num_frames:
+                    batch_for_cond[key] = value.view(batch_size * num_frames, *value.shape[2:])
+                # 如果是 3D 张量 (B, C, H, W) - 例如 source_image
+                elif value.ndim == 4 and value.shape[0] == batch_size:
+                    # 需要为每个时间步复制 B 次
+                    # 假设 Embedder 会处理 B*T 的输入
+                    # 如果 Embedder 只处理 B，这里需要调整
+                    batch_for_cond[key] = value.repeat_interleave(num_frames, dim=0) # (B*T, C, H, W)
+                # 如果是 2D 张量 (B, D) - 例如 fgid, frid
+                elif value.ndim == 2 and value.shape[0] == batch_size:
+                     batch_for_cond[key] = value.repeat_interleave(num_frames, dim=0) # (B*T, D)
+                # 如果已经是 (B*T, ...) 形状 (例如我们之前 repeat 的 fgid)
+                elif value.shape[0] == batch_size * num_frames:
+                     batch_for_cond[key] = value
+                # 其他情况暂时保持不变 (例如 is_same_identity 可能已经是 B*T)
+                else:
+                    batch_for_cond[key] = value
+                    # logger.debug(f"Tensor '{key}' shape {value.shape} 未被 reshape。")
+            else:
+                batch_for_cond[key] = value # 非 Tensor 数据直接复制
+
+        # 使用 reshape 后的 batch_for_cond 获取条件
         try:
-             c, uc = self.conditioner.get_unconditional_conditioning(batch)
-             # 将 c 和 uc 添加回 batch 以便 forward 函数访问 (或者直接传递)
-             batch["c"] = c
-             batch["uc"] = uc
+             c, uc = self.conditioner.get_unconditional_conditioning(batch_for_cond)
+             # 将 c 和 uc 添加回 batch_for_cond (或原始 batch) 以便 forward 访问
+             batch_for_cond["c"] = c
+             batch_for_cond["uc"] = uc
         except Exception as e_cond:
              logger.error(f"获取条件失败: {e_cond}", exc_info=True)
              return torch.tensor(0.0, device=self.device), {}
+        # --- 修改结束 ---
 
 
         # 3. 添加全局步数
-        batch["global_step"] = self.global_step
+        batch_for_cond["global_step"] = self.global_step
 
-        # 4. 调用 forward 计算损失
-        loss, loss_dict = self.forward(x, batch)
+        # 4. 调用 forward 计算损失 (传递 reshape 后的 batch_for_cond)
+        loss, loss_dict = self.forward(x, batch_for_cond) # <<<--- 传递修改后的 batch
 
         return loss, loss_dict
+
 
     def training_step(self, batch: Dict, batch_idx: int) -> Optional[torch.Tensor]:
         """Pytorch Lightning 训练步骤"""
@@ -648,7 +762,19 @@ class DiffusionEngine(pl.LightningModule):
 
     # --- configure_optimizers ---
     def configure_optimizers(self):
-        lr = self.learning_rate # Pytorch Lightning HParams 会自动设置 self.learning_rate
+        # --- 从 optimizer_config 获取学习率 ---
+        lr = self.optimizer_config.get('lr') # 尝试直接获取 lr
+        if lr is None:
+            # 如果 optimizer_config 中没有直接的 'lr'，尝试从 params 获取
+            lr = self.optimizer_config.get('params', {}).get('lr')
+        if lr is None:
+            # 如果仍然没有，可能需要设置一个默认值或从 hparams 获取 (但不推荐)
+            logger.warning("Learning rate not found directly in optimizer_config. Attempting to use self.hparams.learning_rate (may fail).")
+            # 尝试从 hparams 获取作为最后的手段
+            lr = self.hparams.get('learning_rate', 1e-4) # 提供一个默认值以防万一
+            if lr is None: # 如果 hparams 也没有
+                raise ValueError("Learning rate ('lr') must be defined in optimizer_config or hyperparameters.")
+        # --- 修改结束 ---  
         params_to_optimize = []
 
         # 1. U-Net 参数 (self.model)
@@ -680,7 +806,9 @@ class DiffusionEngine(pl.LightningModule):
 
         # 实例化优化器
         try:
-            opt = self.instantiate_optimizer_from_config(params_to_optimize, lr, self.optimizer_config)
+            # 确保 optimizer_config 是字典
+            opt_cfg_dict = OmegaConf.to_container(self.optimizer_config, resolve=True) if OmegaConf.is_config(self.optimizer_config) else self.optimizer_config
+            opt = self.instantiate_optimizer_from_config(params_to_optimize, lr, opt_cfg_dict) # <<<--- 传递 lr
         except Exception as e_opt:
             logger.error(f"实例化优化器失败: {e_opt}", exc_info=True)
             raise
@@ -713,7 +841,7 @@ class DiffusionEngine(pl.LightningModule):
 
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
-            self.model_ema.update() # 使用 update() 更标准
+            self.model_ema(self.model)
 
     @contextmanager
     def ema_scope(self, context=None):
@@ -731,12 +859,15 @@ class DiffusionEngine(pl.LightningModule):
                     logger.info(f"{context}: Restored training weights")
 
     def instantiate_optimizer_from_config(self, params, lr, cfg):
-        target = cfg.get("target", "torch.optim.AdamW") # 默认 AdamW
+        target = cfg.get("target", "torch.optim.AdamW")
         logger.info(f"Instantiating optimizer {target} with learning rate {lr}")
+        # 确保 cfg['params'] 存在且是字典
+        optimizer_params = cfg.get("params", {})
+        # 确保 lr 参数被传递
+        optimizer_params['lr'] = lr # 显式设置 lr
         return get_obj_from_str(target)(
-            params, lr=lr, **cfg.get("params", dict())
+            params, **optimizer_params # 解包包含 lr 的参数字典
         )
-
     @torch.no_grad()
     def sample( self, cond: Dict, uc: Optional[Dict] = None, batch_size: int = 16, shape: Optional[Union[Tuple, List]] = None, **kwargs ):
         """模型推理采样"""

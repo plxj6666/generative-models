@@ -22,7 +22,7 @@ from ...modules.diffusionmodules.util import (extract_into_tensor,
 from ...modules.distributions.distributions import DiagonalGaussianDistribution
 from ...util import (append_dims, autocast, count_params, default,
                      disabled_train, expand_dims_like, instantiate_from_config)
-
+from contextlib import nullcontext
 
 class AbstractEmbModel(nn.Module):
     def __init__(self):
@@ -116,29 +116,33 @@ class GeneralConditioner(nn.Module): # 保留类定义和其他方法
             force_zero_embeddings = []
 
         for embedder in self.embedders:
-            embedding_context = nullcontext if embedder.is_trainable else torch.no_grad() # 确保 no_grad 是被调用的
+            # --- 修改这里：访问 _is_trainable ---
+
+            is_trainable = getattr(embedder, '_is_trainable', False)
+            embedding_context = nullcontext() if is_trainable else torch.no_grad()
+            # logger.debug(f"Processing {embedder.__class__.__name__}, is_trainable={is_trainable}, context={type(embedding_context)}") # 添加调试日志
+
             with embedding_context:
-                # 获取 embedder 的输入
+                # --- 获取输入和处理 legacy_ucg_val ---
                 try:
-                    if hasattr(embedder, "input_key") and (embedder.input_key is not None):
-                        # print(f"Debug: Processing embedder {embedder.__class__.__name__} with input_key '{embedder.input_key}'")
-                        # print(f"Debug: Batch keys: {list(batch.keys())}")
-                        # print(f"Debug: Input value type: {type(batch[embedder.input_key])}")
-                        # if isinstance(batch[embedder.input_key], torch.Tensor):
-                        #      print(f"Debug: Input tensor shape: {batch[embedder.input_key].shape}")
+                    input_val = None
+                    if hasattr(embedder, "input_key") and embedder.input_key:
                         if embedder.input_key not in batch:
-                             logger.error(f"Embedder {embedder.__class__.__name__} 需要的 input_key '{embedder.input_key}' 不在 batch 中！ 可用的键: {list(batch.keys())}")
-                             continue # 跳过这个 embedder
-                        if embedder.legacy_ucg_val is not None:
-                            batch = self.possibly_get_ucg_val(embedder, batch)
-                        emb_out = embedder(batch[embedder.input_key])
+                             logger.error(f"Embedder {embedder.__class__.__name__} input_key '{embedder.input_key}' not in batch!")
+                             continue
+                        input_val = batch[embedder.input_key]
+                        # 访问 legacy_ucg_val 前先检查是否存在
+                        if hasattr(embedder, 'legacy_ucg_val') and embedder.legacy_ucg_val is not None:
+                             # possibly_get_ucg_val 可能需要修改以处理非列表情况
+                             batch = self.possibly_get_ucg_val(embedder, batch)
+                             input_val = batch[embedder.input_key] # 更新 input_val
+                        emb_out = embedder(input_val)
                     elif hasattr(embedder, "input_keys"):
-                        # print(f"Debug: Processing embedder {embedder.__class__.__name__} with input_keys '{embedder.input_keys}'")
-                        emb_out = embedder(*[batch[k] for k in embedder.input_keys])
+                        inputs = [batch[k] for k in embedder.input_keys]
+                        emb_out = embedder(*inputs)
                     else:
-                         # 不应该发生，因为 __init__ 中有检查
-                         logger.error(f"Embedder {embedder.__class__.__name__} 既没有 input_key 也没有 input_keys。")
-                         continue
+                        logger.error(f"Embedder {embedder.__class__.__name__} has no input_key or input_keys.")
+                        continue
                 except KeyError as e:
                      logger.error(f"处理 Embedder {embedder.__class__.__name__} 时发生 KeyError: 输入键 '{e}' 不在 batch 中！可用的键: {list(batch.keys())}")
                      continue # 跳过这个 embedder
@@ -178,7 +182,8 @@ class GeneralConditioner(nn.Module): # 保留类定义和其他方法
                          continue
 
                 # 应用 UCG rate
-                if embedder.ucg_rate > 0.0 and embedder.legacy_ucg_val is None:
+                ucg_rate = getattr(embedder, '_ucg_rate', 0.0) # <<<--- 访问 _ucg_rate
+                if ucg_rate > 0.0 and getattr(embedder, 'legacy_ucg_val', None) is None:
                     # 确保 emb 是浮点类型以应用 Bernoulli mask
                     if not torch.is_floating_point(emb):
                          logger.warning(f"Embedder {embedder.__class__.__name__} 的输出不是浮点类型 ({emb.dtype})，无法应用 UCG rate。")

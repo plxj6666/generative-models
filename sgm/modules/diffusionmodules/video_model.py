@@ -12,7 +12,8 @@ from ...modules.spacetime_attention import (
 )
 from ...util import default
 from .util import AlphaBlender # , LegacyAlphaBlenderWithBug, get_alpha
-
+import logging
+logger = logging.getLogger(__name__)
 
 class VideoResBlock(ResBlock):
     def __init__(
@@ -454,6 +455,10 @@ class VideoUNet(nn.Module):
         num_video_frames: Optional[int] = None,
         image_only_indicator: Optional[th.Tensor] = None,
     ):
+        # --- 在方法开始时打印接收到的 num_video_frames ---
+        logger.debug(f"[VideoUNet.forward] Received num_video_frames = {num_video_frames}")
+        if num_video_frames is None: logger.warning("[VideoUNet.forward] num_video_frames is None!")
+
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional -> no, relax this TODO"
@@ -467,6 +472,13 @@ class VideoUNet(nn.Module):
 
         h = x
         for module in self.input_blocks:
+            # --- 在调用 module 前打印传递的 num_video_frames ---
+            logger.debug(f"[VideoUNet.forward -> input_block] Passing num_video_frames = {num_video_frames}")
+            # --- 在调用 module 前检查类型 ---
+            logger.debug(f"VideoUNet: Before input_block, context type: {type(context)}")
+            if not isinstance(context, dict) and context is not None:
+                 logger.error("VideoUNet: Context became non-dict before input_block!")
+            # ---
             h = module(
                 h,
                 emb,
@@ -476,6 +488,9 @@ class VideoUNet(nn.Module):
                 num_video_frames=num_video_frames,
             )
             hs.append(h)
+        # --- 对 middle_block 和 output_blocks 的调用也添加类似日志 ---
+        logger.debug(f"[VideoUNet.forward -> middle_block] Passing num_video_frames = {num_video_frames}")
+        logger.debug(f"VideoUNet: Before middle_block, context type: {type(context)}")
         h = self.middle_block(
             h,
             emb,
@@ -486,6 +501,8 @@ class VideoUNet(nn.Module):
         )
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
+            logger.debug(f"[VideoUNet.forward -> output_block] Passing num_video_frames = {num_video_frames}")
+            logger.debug(f"VideoUNet: Before output_block, context type: {type(context)}")
             h = module(
                 h,
                 emb,

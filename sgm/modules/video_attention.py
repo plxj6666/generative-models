@@ -260,84 +260,67 @@ class SpatialVideoTransformer(SpatialTransformer): # 继承修改后的 SpatialT
     def forward(
         self,
         x: torch.Tensor,
-        context: Optional[Dict] = None, # <<<--- 修改: 接收字典
-        time_context: Optional[torch.Tensor] = None, # 这个可能仍然是 Tensor
+        context: Optional[Dict] = None, # <<<--- 确认接收字典
+        time_context: Optional[torch.Tensor] = None,
         timesteps: Optional[int] = None,
         image_only_indicator: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        b, c_in, h, w = x.shape
-        x_in = x
-        # --- 从 context 字典中分离 spatial context (给 transformer_blocks) ---
-        # 父类的 forward 处理 spatial attention
-        # 空间 context 现在是 context 字典本身
-        spatial_context_dict = context
+        # --- 在方法开始时打印接收到的 context 类型 ---
+        logger.debug(f"[SpatialVideoTransformer.forward] Received context type: {type(context)}")
+        if not isinstance(context, dict) and context is not None:
+             logger.error(f"[SpatialVideoTransformer.forward] ERROR: Expected context to be a Dict, but got {type(context)}!")
         # ---
 
-        # --- 处理 time_context (给 time_stack) ---
+        b, c_in, h, w = x.shape
+        x_in = x
+        spatial_context_dict = context # 假设传入的是字典
+
+        # --- 处理 time_context (逻辑不变，但可以加日志) ---
         actual_time_context = None
         if self.use_spatial_context:
-             # 如果使用空间 context 作为时间 context
-             # 需要决定是从 dict 里取 'crossattn' 还是 'f_attr_tokens' 或其他？
-             # 假设使用 DIL context ('crossattn')
-             main_context_tensor = context.get('crossattn') if context else None
+             main_context_tensor = context.get('crossattn') if isinstance(context, dict) else None # 安全获取
              if main_context_tensor is not None and main_context_tensor.ndim == 3:
-                 # 提取第一个时间步的 context 并 repeat
-                 # 需要知道 timesteps
-                 if timesteps is None or timesteps == 0:
-                      logger.warning("use_spatial_context=True 但无法确定 timesteps，无法准备 time_context。")
-                 else:
+                 if timesteps is None or timesteps == 0: logger.warning(...)
+                 else: # ... (repeat 逻辑) ...
                       time_context_first_timestep = main_context_tensor[::timesteps]
-                      actual_time_context = repeat(
-                          time_context_first_timestep, "b seq d -> (b n) seq d", n=h * w # 假设是 (B, N_seq, D)
-                      )
-             elif main_context_tensor is not None:
-                  logger.warning(f"use_spatial_context=True 但 'crossattn' 维度 ({main_context_tensor.ndim}) 不是 3D，无法准备 time_context。")
-
-        elif time_context is not None: # 如果独立提供了 time_context Tensor
+                      actual_time_context = repeat( time_context_first_timestep, "b seq d -> (b n) seq d", n=h * w )
+             elif main_context_tensor is not None: logger.warning(...)
+        elif time_context is not None: # ... (repeat 逻辑) ...
             actual_time_context = repeat(time_context, "b ... -> (b n) ...", n=h * w)
-            if actual_time_context.ndim == 2: # B*N, D -> B*N, 1, D
-                actual_time_context = rearrange(actual_time_context, "b c -> b 1 c")
+            if actual_time_context.ndim == 2: actual_time_context = rearrange(actual_time_context, "b c -> b 1 c")
+        logger.debug(f"[SpatialVideoTransformer.forward] Prepared actual_time_context type: {type(actual_time_context)}")
         # --- time_context 处理结束 ---
 
 
         x = self.norm(x)
-        if not self.use_linear:
-            x = self.proj_in(x)
+        if not self.use_linear: x = self.proj_in(x)
         x = rearrange(x, "b c h w -> b (h w) c").contiguous()
-        if self.use_linear:
-            x = self.proj_in(x)
+        if self.use_linear: x = self.proj_in(x)
 
-        # --- 核心循环：空间处理 + 时间混合 ---
-        for it_, (block, mix_block) in enumerate(
-            zip(self.transformer_blocks, self.time_stack)
-        ):
+        # --- 核心循环 ---
+        for it_, (block, mix_block) in enumerate( zip(self.transformer_blocks, self.time_stack) ):
+            # --- 在调用 block 前检查 spatial_context_dict 类型 ---
+            logger.debug(f"[SpatialVideoTransformer.forward -> block {it_}] Passing context type: {type(spatial_context_dict)}")
+            if not isinstance(spatial_context_dict, dict) and spatial_context_dict is not None:
+                 logger.error(f"[SpatialVideoTransformer.forward -> block {it_}] ERROR: Context is not a Dict!")
+            # ---
             # 1. 空间处理
-            x = block(x, context=spatial_context_dict)
+            x = block(x, context=spatial_context_dict) # <<<--- 传递字典
 
             # 2. 时间混合
             x_mix = x
-            # --- 不再添加 emb ---
-            # if emb.shape[-1] == x_mix.shape[-1]:
-            #      x_mix = x_mix + emb
-            # else:
-            #      logger.warning(...)
-            # ---
-
             # 调用时间混合块
-            x_mix = mix_block(x_mix, context=actual_time_context, timesteps=timesteps)
+            # --- 在调用 mix_block 前检查 actual_time_context 类型 ---
+            logger.debug(f"[SpatialVideoTransformer.forward -> mix_block {it_}] Passing time_context type: {type(actual_time_context)}")
+            # ---
+            x_mix = mix_block(x_mix, context=actual_time_context, timesteps=timesteps) # <<<--- 传递 time_context
 
             # 应用 AlphaBlender
-            x = self.time_mixer(
-                x_spatial=x,
-                x_temporal=x_mix,
-                image_only_indicator=image_only_indicator,
-            )
+            x = self.time_mixer( x_spatial=x, x_temporal=x_mix, image_only_indicator=image_only_indicator )
         # --- 循环结束 ---
 
-        if self.use_linear:
-            x = self.proj_out(x)
+        if self.use_linear: x = self.proj_out(x)
         x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
-        if not self.use_linear:
-            x = self.proj_out(x)
+        if not self.use_linear: x = self.proj_out(x)
         out = x + x_in
         return out

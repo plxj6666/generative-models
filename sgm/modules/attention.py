@@ -835,17 +835,31 @@ class BasicTransformerBlockWithHifiVFSContext(nn.Module):
             logpy.debug(f"{self.__class__.__name__} is using checkpointing")
 
     def forward(self, x: torch.Tensor, context: Optional[Dict] = None) -> torch.Tensor:
-        """
-        Args:
-            x (torch.Tensor): Input tensor (B, N, C).
-            context (Optional[Dict]): Conditioning dictionary. Expected keys:
-                                      'crossattn': DIL tokens (B, N_dil, C_dil).
-                                      'f_attr_tokens': FAL tokens (B, N_fal, C_fal). (Optional)
-        """
-        if self.checkpoint:
-            return checkpoint(self._forward, x, context, use_reentrant=False) # PyTorch >= 1.11 推荐 use_reentrant=False
+        if self.checkpoint and self.training: # 只在训练时启用 checkpoint
+            # --- 从 context 提取 Tensor ---
+            context = default(context, {})
+            dil_context_tensor = context.get('crossattn')
+            fal_context_tensor = context.get('f_attr_tokens')
+
+            # --- 将 Tensor 作为单独参数传递给 checkpoint ---
+            # 注意：如果某个 context 为 None，也需要传递 None
+            return checkpoint(self._forward_for_checkpoint, x, dil_context_tensor, fal_context_tensor, use_reentrant=False)
         else:
+            # 非 checkpoint 或 eval 模式下，直接调用 _forward
             return self._forward(x, context)
+
+    # --- 新增一个用于 checkpoint 的内部 forward 方法 ---
+    def _forward_for_checkpoint(self, x: torch.Tensor, dil_context_tensor: Optional[torch.Tensor], fal_context_tensor: Optional[torch.Tensor]) -> torch.Tensor:
+        # --- 在这里重新组合 context 字典 ---
+        context_dict = {}
+        if dil_context_tensor is not None:
+            context_dict['crossattn'] = dil_context_tensor
+        if fal_context_tensor is not None:
+            context_dict['f_attr_tokens'] = fal_context_tensor
+
+        # --- 调用原始的 _forward 逻辑 ---
+        return self._forward(x, context_dict)
+    # --- 新增结束 ---
 
     def _forward(self, x: torch.Tensor, context: Optional[Dict] = None) -> torch.Tensor:
         context = default(context, {}) # 确保 context 是字典

@@ -6,7 +6,9 @@ import torch.nn as nn
 from ...util import append_dims, instantiate_from_config
 from .denoiser_scaling import DenoiserScaling
 from .discretizer import Discretization
-
+from typing import Optional
+import logging
+logger = logging.getLogger(__name__)
 
 class Denoiser(nn.Module):
     def __init__(self, scaling_config: Dict):
@@ -26,6 +28,7 @@ class Denoiser(nn.Module):
         input: torch.Tensor,
         sigma: torch.Tensor,
         cond: Dict,
+        num_video_frames: Optional[int] = None,
         **additional_model_inputs,
     ) -> torch.Tensor:
         sigma = self.possibly_quantize_sigma(sigma)
@@ -33,8 +36,17 @@ class Denoiser(nn.Module):
         sigma = append_dims(sigma, input.ndim)
         c_skip, c_out, c_in, c_noise = self.scaling(sigma)
         c_noise = self.possibly_quantize_c_noise(c_noise.reshape(sigma_shape))
+        # --- 在调用 network 前打印 num_video_frames ---
+        num_frames_received = additional_model_inputs.get('num_video_frames')
+        logger.debug(f"[Denoiser.forward] Received num_video_frames = {num_frames_received}")
+        if num_frames_received is None: logger.warning("[Denoiser.forward] num_video_frames is None!")
+        # --- 在调用 network 前检查类型 ---
+        logger.debug(f"Denoiser: Before network, cond type: {type(cond)}")
+        if not isinstance(cond, dict) and cond is not None:
+             logger.error("Denoiser: Context became non-dict before network!")
+        # ---
         return (
-            network(input * c_in, c_noise, cond, **additional_model_inputs) * c_out
+            network(input * c_in, c_noise, cond, num_video_frames=num_video_frames, **additional_model_inputs) * c_out
             + input * c_skip
         )
 
