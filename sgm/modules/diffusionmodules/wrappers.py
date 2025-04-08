@@ -35,7 +35,7 @@ class OpenAIWrapper(IdentityWrapper):
         # --- 准备传递给 VideoUNet 的参数 ---
         unet_kwargs = {
             "timesteps": t,
-            "context": c.get("crossattn", None), # 传递字典或 None
+            "context": c,  # 传递完整字典，而不是 c.get("crossattn", None)
             "y": c.get("vector", None),
             "num_video_frames": num_video_frames, # <<<--- 传递 num_video_frames
             **kwargs # 传递其他未显式处理的 kwargs
