@@ -862,30 +862,32 @@ class BasicTransformerBlockWithHifiVFSContext(nn.Module):
     # --- 新增结束 ---
 
     def _forward(self, x: torch.Tensor, context: Optional[Dict] = None) -> torch.Tensor:
-        context = default(context, {}) # 确保 context 是字典
-
-        # --- 1. Self-Attention (or Cross-Attention if disable_self_attn) ---
-        attn1_context = context.get('crossattn') if self.disable_self_attn else None
-        x = self.attn1(self.norm1(x), context=attn1_context) + x
-
-        # --- 2. DIL Cross-Attention ---
+        # 处理输入 context
+        if context is None:
+            context = {}
+        elif isinstance(context, torch.Tensor):
+            # 兼容处理：如果传入 tensor，当作 dil_context
+            context = {'crossattn': context}
+        
+        # 获取不同类型的 context
         dil_context = context.get('crossattn')
+        fal_context = context.get('f_attr_tokens')
+        
+        # 1. 自注意力
+        if self.disable_self_attn:
+            x = self.attn1(self.norm1(x), context=dil_context) + x
+        else:
+            x = self.attn1(self.norm1(x)) + x
+        
+        # 2. DIL 交叉注意力
         if dil_context is not None:
-             x = self.attn_dil(self.norm_dil(x), context=dil_context) + x
-        # else: # 如果没有 DIL context，可以选择跳过或报错
-        #     logger.warning("DIL context ('crossattn') not found in context dict.")
-
-        # --- 3. FAL Attribute Cross-Attention (if enabled) ---
-        if self.attn_fal is not None:
-            fal_context = context.get('f_attr_tokens')
-            if fal_context is not None:
-                 x = self.attn_fal(self.norm_fal(x), context=fal_context) + x
-            # else: # 如果没有 FAL context，可以选择跳过或报错
-            #     logger.warning("FAL context ('f_attr_tokens') not found in context dict.")
-
-
-        # --- 4. FeedForward ---
+            x = self.attn_dil(self.norm_dil(x), context=dil_context) + x
+        
+        # 3. FAL 交叉注意力 (如果有)
+        if hasattr(self, 'attn_fal') and self.attn_fal is not None and fal_context is not None:
+            x = self.attn_fal(self.norm_fal(x), context=fal_context) + x
+        
+        # 4. FeedForward - 修复：使用 norm_ff 而不是不存在的 norm3
         x = self.ff(self.norm_ff(x)) + x
-
+        
         return x
-

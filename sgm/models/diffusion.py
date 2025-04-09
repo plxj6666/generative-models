@@ -12,6 +12,7 @@ from safetensors.torch import load_file as load_safetensors
 from torch.optim.lr_scheduler import LambdaLR
 import logging
 import numpy as np  
+import cv2
 import torch.nn as nn
 from ..modules.encoders.modules import AbstractEmbModel # <--- 顶部的导入仍然需要
 from ..modules.diffusionmodules.denoiser import DiscreteDenoiser
@@ -124,30 +125,8 @@ class DiffusionEngine(pl.LightningModule):
 
         # --- f_low 注入和投影层初始化 ---
         self.f_low_injection = f_low_injection
-        self.f_low_proj_layer = None
-        if self.f_low_injection:
-             # --- 获取 VAE latent 通道数 (通常是 4) ---
-             # 尝试从 VAE 配置获取
-             vae_latent_channels = first_stage_config.get('params',{}).get('ddconfig',{}).get('z_channels', 4)
-             # --- 获取 f_low 通道数 (来自 AttributeEncoder，硬编码或从配置读取) ---
-             # 假设 f_low 通道固定为 320 (根据 encoder.py)
-             f_low_channels = 320
-             if attribute_encoder_instance is not None:
-                  # (可选) 尝试从实例获取，如果 Encoder 有属性的话
-                  # f_low_channels = getattr(attribute_encoder_instance, 'output_low_channels', 320)
-                  pass
-
-             if f_low_channels != vae_latent_channels:
-                  logger.info(f"Initializing 1x1 Conv layer to project f_low from {f_low_channels} to {vae_latent_channels} channels.")
-                  self.f_low_proj_layer = nn.Conv2d(
-                      in_channels=f_low_channels,
-                      out_channels=vae_latent_channels,
-                      kernel_size=1
-                  )
-                  # 这个投影层是否需要训练？通常需要，将其参数添加到优化器
-                  # (configure_optimizers 会自动处理，因为它是 self 的属性)
-             else:
-                  logger.info(f"f_low channels ({f_low_channels}) match VAE latent channels ({vae_latent_channels}). No projection needed.")
+        # 移除f_low_proj_layer初始化和相关逻辑
+        # 不再需要将f_low投影到VAE潜变量通道数
         # --- 初始化结束 ---
 
         # --- 直接使用传入的实例 ---
@@ -322,55 +301,55 @@ class DiffusionEngine(pl.LightningModule):
         return x
 
     @torch.no_grad()
-    def decode_first_stage(self, z: torch.Tensor) -> torch.Tensor: # 完整实现
-        vae_device = next(self.first_stage_model.parameters()).device
-        z = 1.0 / self.scale_factor * z.to(vae_device)
-        n_samples = default(self.en_and_decode_n_samples_a_time, z.shape[0])
-        n_rounds = math.ceil(z.shape[0] / n_samples)
-        all_out = []
-        try:
-            with torch.autocast(self.device.type, enabled=not self.disable_first_stage_autocast):
-                for n in range(n_rounds):
-                    z_batch = z[n * n_samples : (n + 1) * n_samples]
-                    out = self.first_stage_model.decode(z_batch)
-                    all_out.append(out.cpu()) # Decode on device, move to CPU after
-            out = torch.cat(all_out, dim=0)
-        except Exception as e:
-            logger.error(f"VAE decoding failed: {e}", exc_info=True)
-            bs, _, h, w = z.shape
-            out_c = getattr(self.first_stage_model.decoder, 'out_channels', 3) # Guess output channels
-            out_res_mult = getattr(self.first_stage_model, 'scale_factor_reciprocal', 8) # Guess scale factor
-            out = torch.zeros(bs, out_c, h * out_res_mult, w * out_res_mult, dtype=torch.float32)
-        return out.to(self.device) # Move final result to main device
-
+    def decode_first_stage(self, z):
+        """确保能处理视频格式的VAE latent"""
+        original_shape = z.shape
+        is_video = len(original_shape) == 5  # (B,T,C,H,W)格式
+        
+        if is_video:
+            B, T, C, H, W = original_shape
+            z = z.reshape(B*T, C, H, W)
+        
+        # 正常解码
+        result = self.first_stage_model.decode(z)
+        
+        # 恢复视频格式
+        if is_video:
+            _, C_out, H_out, W_out = result.shape
+            result = result.reshape(B, T, C_out, H_out, W_out)
+        
+        return result
+    
     @torch.no_grad()
-    def encode_first_stage(self, x: torch.Tensor) -> torch.Tensor:
-        # self.first_stage_model.to(x.device) # PL 会处理
-        n_samples = default(self.en_and_decode_n_samples_a_time, x.shape[0])
-        n_rounds = math.ceil(x.shape[0] / n_samples)
-        all_out = []
-        try:
-            with torch.autocast(self.device.type, enabled=not self.disable_first_stage_autocast):
-                for n in range(n_rounds):
-                    x_batch = x[n * n_samples : (n + 1) * n_samples]
-                    # VAE encoder 通常返回分布对象
-                    encoder_posterior = self.first_stage_model.encode(x_batch)
-                    # 获取潜变量样本
-                    if isinstance(encoder_posterior, torch.Tensor): # 有些 VAE 直接返回 Tensor
-                         out = encoder_posterior
-                    elif hasattr(encoder_posterior, 'sample'):
-                         out = encoder_posterior.sample()
-                    elif hasattr(encoder_posterior, 'mode'):
-                         out = encoder_posterior.mode()
-                    else:
-                         raise TypeError(f"VAE encode 返回了未知类型: {type(encoder_posterior)}")
-                    all_out.append(out)
-            z = torch.cat(all_out, dim=0)
-            z = self.scale_factor * z
-        except Exception as e:
-            logger.error(f"VAE 编码失败: {e}", exc_info=True)
-            z = torch.zeros(x.shape[0], 4, x.shape[2]//8, x.shape[3]//8, device=x.device) # 假设 latent 通道为4
-            # raise e
+    def encode_first_stage(self, x):
+        """编码，支持视频格式"""
+        is_video = len(x.shape) == 5
+        original_shape = x.shape
+        
+        if is_video:
+            # 视频输入(B,T,C,H,W) -> 重塑为(B*T,C,H,W)
+            B, T, C, H, W = x.shape
+            x = x.reshape(B*T, C, H, W)
+        
+        if self.disable_first_stage_autocast:
+            encoder_posterior = self.first_stage_model.encode(x)
+        else:
+            with torch.cuda.amp.autocast(enabled=False):
+                encoder_posterior = self.first_stage_model.encode(x)
+        
+        # 处理不同类型的返回值
+        if hasattr(encoder_posterior, 'sample'):
+            z = encoder_posterior.sample() * self.scale_factor
+        else:
+            # 如果直接返回Tensor，直接使用
+            z = encoder_posterior * self.scale_factor
+        
+        # 恢复视频形状
+        if is_video:
+            # (B*T,C_latent,H_latent,W_latent) -> (B,T,C_latent,H_latent,W_latent)
+            _, C_latent, H_latent, W_latent = z.shape
+            z = z.reshape(B, T, C_latent, H_latent, W_latent)
+        
         return z
 
     def forward(self, x: torch.Tensor, batch: Dict) -> Tuple[torch.Tensor, Dict]:
@@ -449,52 +428,15 @@ class DiffusionEngine(pl.LightningModule):
         
         # 4. 处理 f_low 注入 (如果启用)
         model_input = xt
+        f_attr_low = None
         if self.f_low_injection and self.attribute_encoder is not None:
-            f_low = None # 初始化 f_low
-            # 使用 no_grad 计算 f_low，因为我们通常不希望 f_low 注入影响 Eattr 梯度
-            # 如果 Eattr 浅层也需要训练，需要移除 no_grad
-            with torch.no_grad(): # <<<--- 推荐使用 no_grad 计算 f_low
-                try:
-                    if x.ndim == 4:
-                        _, f_low = self.attribute_encoder(x) # (B*T, 320, H, W)
-                    else: logger.warning(...)
-                except Exception as e_flow: logger.warning(...); f_low = None
+            with torch.no_grad():
+                # 从AttributeEncoder获取f_attr_low
+                f_attr_low = self.attribute_encoder.extract_low_level_features(x)
 
-            if f_low is not None:
-                # --- 应用投影层 (如果存在) ---
-                if self.f_low_proj_layer is not None:
-                    try:
-                        # 投影层也应该在 no_grad 上下文中，除非你想训练它
-                        # 但通常 f_low 注入的目的是提供信息，不参与梯度
-                        f_low_projected = self.f_low_proj_layer(f_low) # (B*T, 4, H, W)
-                        logger.debug(f"Projected f_low shape: {f_low_projected.shape}")
-                    except Exception as e_proj:
-                        logger.error(f"Failed to project f_low: {e_proj}", exc_info=True)
-                        f_low_projected = None
-                else:
-                    # 如果不需要投影 (通道数已匹配)
-                    f_low_projected = f_low
-                # --- 投影结束 ---
-
-                # --- 注入投影后的 f_low ---
-                if f_low_projected is not None:
-                    if model_input.shape == f_low_projected.shape:
-                        model_input = model_input + f_low_projected # <<<--- 使用投影后的 f_low
-                        logger.debug("Projected f_low added to U-Net input.")
-                    else:
-                        # 检查通道数和空间尺寸
-                        if model_input.shape[1] != f_low_projected.shape[1]:
-                             logger.warning(f"Model input channels ({model_input.shape[1]}) and projected f_low channels ({f_low_projected.shape[1]}) mismatch after projection! Cannot inject.")
-                        elif model_input.shape[2:] != f_low_projected.shape[2:]:
-                             logger.warning(f"Model input spatial size ({model_input.shape[2:]}) and projected f_low ({f_low_projected.shape[2:]}) mismatch! Cannot inject.")
-                        else: # 其他未知形状问题
-                             logger.warning(f"Model input shape ({model_input.shape}) and projected f_low shape ({f_low_projected.shape}) mismatch! Cannot inject.")
-                # --- 注入结束 ---
-        # --- U-Net 调用 (现在不需要 additional_model_inputs 字典了) ---
         try:
             x_pred = self.denoiser(self.model, model_input, sigmas_t, cond=c,
-                                   num_video_frames=num_frames) # <<<--- 直接传递显式参数
-            # --- 修改结束 ---
+                                   num_video_frames=num_frames, f_attr_low=f_attr_low) # <<<--- 直接传递显式参数
         except Exception as e_unet:
              logger.error(f"U-Net/Denoiser 前向传播失败: {e_unet}", exc_info=True)
              return torch.tensor(0.0, device=self.device, requires_grad=True), loss_dict
@@ -663,71 +605,161 @@ class DiffusionEngine(pl.LightningModule):
         return fgid_batch
 
     def shared_step(self, batch: Dict) -> Any:
-        """准备数据并调用 forward 计算损失"""
-        # 1. 获取 VAE latent 输入 x (来自 dataset 的 'vt')
+        """处理一个训练批次，计算损失"""
         try:
-            x_orig_shape = batch[self.input_key].shape # 记录原始形状 (B, T, C, H, W)
-            x = self.get_input(batch) # get_input 应该返回 (B*T, C, H, W)
-            if not (x.ndim == 4 and x.shape[0] == x_orig_shape[0] * x_orig_shape[1]):
-                 logger.warning(f"get_input 返回的形状 ({x.shape}) 可能不符合预期的 B*T 格式 (原始: {x_orig_shape})")
-                 # 根据需要添加错误处理或 reshape
-                 if x.ndim == 5 and x.shape[0] == x_orig_shape[0] and x.shape[1] == x_orig_shape[1]:
-                      x = x.view(-1, *x.shape[2:]) # 手动 reshape
-                 else:
-                      raise ValueError("无法将输入 reshape 为 (B*T, C, H, W)")
-
-        except ValueError as e: logger.error(f"获取或 reshape 输入失败: {e}"); return torch.tensor(0.0, device=self.device), {}
-        except KeyError as e: logger.error(f"获取输入失败: 输入键 '{e}' 不在 batch 中。"); return torch.tensor(0.0, device=self.device), {}
-
-        # 2. --- 修改：确保 batch 中其他需要 Embedder 处理的数据也被 reshape ---
-        batch_for_cond = {}
-        batch_size = x_orig_shape[0] # B
-        num_frames = x_orig_shape[1] # T
-
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                # 如果是 5D 张量 (B, T, ...)， reshape 成 (B*T, ...)
-                if value.ndim == 5 and value.shape[0] == batch_size and value.shape[1] == num_frames:
-                    batch_for_cond[key] = value.view(batch_size * num_frames, *value.shape[2:])
-                # 如果是 3D 张量 (B, C, H, W) - 例如 source_image
-                elif value.ndim == 4 and value.shape[0] == batch_size:
-                    # 需要为每个时间步复制 B 次
-                    # 假设 Embedder 会处理 B*T 的输入
-                    # 如果 Embedder 只处理 B，这里需要调整
-                    batch_for_cond[key] = value.repeat_interleave(num_frames, dim=0) # (B*T, C, H, W)
-                # 如果是 2D 张量 (B, D) - 例如 fgid, frid
-                elif value.ndim == 2 and value.shape[0] == batch_size:
-                     batch_for_cond[key] = value.repeat_interleave(num_frames, dim=0) # (B*T, D)
-                # 如果已经是 (B*T, ...) 形状 (例如我们之前 repeat 的 fgid)
-                elif value.shape[0] == batch_size * num_frames:
-                     batch_for_cond[key] = value
-                # 其他情况暂时保持不变 (例如 is_same_identity 可能已经是 B*T)
+            # 获取输入
+            x = self.get_input(batch)
+            
+            # 获取条件
+            try:
+                c, uc = self.conditioner.get_unconditional_conditioning(batch)
+            except Exception as e:
+                logger.error(f"获取条件失败", exc_info=True)
+                # 修改：返回统一格式的元组
+                return torch.tensor(0.0, device=self.device), {}
+            
+            # 1. 获取输入（VAE潜变量）
+            x = self.get_input(batch)
+            
+            # 2. 获取条件（DIL、属性token等）
+            try:
+                c, uc = self.conditioner.get_unconditional_conditioning(batch)
+            except:
+                # 如果条件处理失败，记录详细错误
+                logger.error(f"获取条件失败", exc_info=True)
+                return torch.tensor(0.0, device=self.device)
+            
+            # 3. 获取时间步和噪声
+            num_train_timesteps = 1000  # 默认值
+            try:
+                if isinstance(self.denoiser, DiscreteDenoiser):
+                    num_train_timesteps = self.denoiser.num_idx
+                elif hasattr(self.loss_fn, "sigma_sampler") and hasattr(self.loss_fn.sigma_sampler, "num_steps"):
+                    num_train_timesteps = self.loss_fn.sigma_sampler.num_steps
                 else:
-                    batch_for_cond[key] = value
-                    # logger.debug(f"Tensor '{key}' shape {value.shape} 未被 reshape。")
+                    logger.warning("无法确定时间步总数，使用默认值 1000")
+            except AttributeError:
+                logger.warning("无法确定时间步总数，使用默认值 1000")
+            
+            t = torch.randint(0, num_train_timesteps, (x.shape[0],), device=self.device).long()
+            
+            # 获取 sigma_t
+            try:
+                if isinstance(self.denoiser, DiscreteDenoiser):
+                    sigmas_t = self.denoiser.idx_to_sigma(t)
+                elif hasattr(self.loss_fn, "sigma_sampler"):
+                    sigmas_t = self.loss_fn.sigma_sampler(x.shape[0]).to(x.device)
+                else:
+                    raise RuntimeError("无法确定 sigma_t")
+            except Exception as e_sigma:
+                logger.error(f"获取 sigma_t 失败: {e_sigma}")
+                return torch.tensor(0.0, device=self.device)
+            
+            # 4. 添加噪声到VAE潜变量 - 这就是Vmt+Noisy的部分
+            noise = torch.randn_like(x)
+            sigmas_bc = append_dims(sigmas_t, x.ndim) 
+            noised_input = x + noise * sigmas_bc  # 这是将要输入UNet的基础内容
+            
+            # 5. 【修改】提取f_attr_low，用于在UNet内部注入
+            # 修改shared_step方法中f_attr_low提取部分
+
+            f_attr_low = None
+            if self.f_low_injection and self.attribute_encoder is not None:
+                with torch.no_grad():
+                    try:
+                        # 从V'prime中提取f_attr_low特征
+                        v_prime_latent = batch.get('v_prime_latent')
+                        if v_prime_latent is not None:
+                            # 处理维度
+                            if v_prime_latent.ndim == 5:  # [B, T, C, H, W]
+                                B, T, C, H, W = v_prime_latent.shape
+                                v_prime_latent_reshaped = v_prime_latent.reshape(B*T, C, H, W)
+                            else:
+                                v_prime_latent_reshaped = v_prime_latent
+                            
+                            # 提取特征
+                            f_attr_low = self.attribute_encoder.extract_low_level_features(v_prime_latent_reshaped.float())
+                            
+                            # 特征维度匹配检查：确保与输入批次大小匹配
+                            input_batch_size = noised_input.shape[0]  # 应该是B*T
+                            if f_attr_low.shape[0] != input_batch_size:
+                                logger.warning(f"f_attr_low批次大小({f_attr_low.shape[0]})与输入({input_batch_size})不匹配，调整中...")
+                                if f_attr_low.shape[0] == 1:
+                                    # 如果只有一个样本，复制到所有帧
+                                    f_attr_low = f_attr_low.repeat(input_batch_size, 1, 1, 1)
+                                    logger.info(f"f_attr_low已扩展至匹配输入批次: {f_attr_low.shape}")
+                            
+                            logger.info(f"从V'提取f_attr_low特征，形状: {f_attr_low.shape}")
+                        else:
+                            logger.warning("未找到v_prime_latent，无法提取正确的f_attr_low")
+                    except Exception as e:
+                        logger.error(f"提取f_attr_low特征失败: {e}")
+                        f_attr_low = None
+
+            # 在shared_step方法中处理面部遮罩的部分
+            # 6. 处理面部遮罩（如果有）
+            mask = batch.get("mask")
+            if mask is not None:
+                # 使用提供的面部遮罩
+                mask_lat = self.encode_first_stage(mask)
+                c["concat"] = mask_lat
+                logger.info("使用提供的面部遮罩")
             else:
-                batch_for_cond[key] = value # 非 Tensor 数据直接复制
+                # 尝试动态生成面部遮罩
+                try:
+                    mask_lat = self.generate_face_mask(x)
+                    c["concat"] = mask_lat
+                    logger.debug(f"动态生成的面部遮罩形状: {mask_lat.shape}")
+                except Exception as e:
+                    logger.warning(f"动态生成面部遮罩失败: {e}")
 
-        # 使用 reshape 后的 batch_for_cond 获取条件
-        try:
-             c, uc = self.conditioner.get_unconditional_conditioning(batch_for_cond)
-             # 将 c 和 uc 添加回 batch_for_cond (或原始 batch) 以便 forward 访问
-             batch_for_cond["c"] = c
-             batch_for_cond["uc"] = uc
-        except Exception as e_cond:
-             logger.error(f"获取条件失败: {e_cond}", exc_info=True)
-             return torch.tensor(0.0, device=self.device), {}
-        # --- 修改结束 ---
-
-
-        # 3. 添加全局步数
-        batch_for_cond["global_step"] = self.global_step
-
-        # 4. 调用 forward 计算损失 (传递 reshape 后的 batch_for_cond)
-        loss, loss_dict = self.forward(x, batch_for_cond) # <<<--- 传递修改后的 batch
-
-        return loss, loss_dict
-
+            # 7. 确定视频帧数
+            num_frames = batch.get('num_video_frames')
+            if num_frames is None and x.ndim == 4:
+                # 推断视频帧数
+                if 'video_length' in batch:
+                    num_frames = batch['video_length']
+                else:
+                    # 假设批次是(B*T, C, H, W)格式，猜测T
+                    batch_size = batch.get('batch_size', 1)
+                    if x.shape[0] % batch_size == 0:
+                        num_frames = x.shape[0] // batch_size
+                    else:
+                        num_frames = 1  # 默认为单帧
+            
+            # 8. 调用模型 - 传递f_attr_low给UNetModel
+            model_output = self.model(
+                x=noised_input,
+                t=t,
+                c=c,
+                num_video_frames=num_frames,
+                f_attr_low=f_attr_low  # 【关键】传递f_attr_low给OpenAIWrapper
+            )
+            
+            # 计算损失
+            if self.loss_fn is not None:
+                # 准备计算损失
+                # 传递所有必要参数给forward方法
+                loss, loss_dict = self.forward(x, {
+                    'c': c,
+                    'uc': uc,
+                    'noise': noise,
+                    'sigmas_t': sigmas_t,
+                    't': t,
+                    'noised_input': noised_input,
+                    'num_video_frames': num_frames,
+                    'fgid': batch.get('fgid', None),  # 用于Lid损失
+                    'frid': batch.get('frid', None),  # 用于FAL损失
+                    'is_same_identity': batch.get('is_same_identity', None)  # 用于FAL损失
+                })
+                return loss, loss_dict
+            else:
+                # 如果没有定义损失函数，则返回模型输出
+                return model_output, {}
+        except Exception as e:
+            # 添加全局异常处理
+            logger.error(f"shared_step发生未处理异常: {e}", exc_info=True)
+            return torch.tensor(0.0, device=self.device), {}
 
     def training_step(self, batch: Dict, batch_idx: int) -> Optional[torch.Tensor]:
         """Pytorch Lightning 训练步骤"""
@@ -964,3 +996,67 @@ class DiffusionEngine(pl.LightningModule):
                   log[k] = log[k].detach().float().cpu()
 
         return log
+    
+    def generate_face_mask(self, x):
+        """生成面部遮罩并编码到VAE潜空间"""
+        # 确保有FaceParser
+        if not hasattr(self, 'face_parser'):
+            from fal_dil.utils.face_parsing import FaceParser
+            self.face_parser = FaceParser(device=self.device)
+        
+        # 保存原始形状
+        original_shape = x.shape
+        is_video = len(original_shape) == 5
+        
+        # 先解码到像素空间 - 使用修改后的工具函数
+        with torch.no_grad():
+            # 替换直接调用为使用工具函数
+            from fal_dil.utils.vae_utils import decode_with_vae
+            pixel_x = decode_with_vae(self.first_stage_model, x, self.scale_factor)
+        
+        # 处理视频格式
+        if is_video:
+            B, T, C, H, W = pixel_x.shape
+            masks = []
+            for b in range(B):
+                frame_masks = []
+                for t in range(T):
+                    frame = pixel_x[b, t]  # (C,H,W)
+                    # 将tensor转换为numpy数组供FaceParser处理
+                    frame_np = frame.permute(1, 2, 0).cpu().numpy()
+                    # 范围从[-1,1]转到[0,255]
+                    frame_np = ((frame_np + 1.0) / 2.0 * 255.0).astype(np.uint8)
+                    # 执行面部解析
+                    mask = self.face_parser.parse(frame_np)  # (H,W,1)
+                    
+                    # 将遮罩转换为Tensor
+                    mask_tensor = torch.from_numpy(mask).float().permute(2, 0, 1).to(device=self.device)  # (1,H,W)
+                    # 复制通道，转换为3通道格式
+                    mask_tensor = mask_tensor.repeat(3, 1, 1)  # (3,H,W) <-- 关键修改
+                    frame_masks.append(mask_tensor)
+                
+                batch_masks = torch.stack(frame_masks, dim=0)  # (T,3,H,W)
+                masks.append(batch_masks)
+            
+            mask_tensor = torch.stack(masks, dim=0)  # (B,T,3,H,W)
+        else:
+            # 处理单帧图像
+            masks = []
+            for b in range(x.shape[0]):
+                # 转换为numpy
+                frame = pixel_x[b].permute(1, 2, 0).cpu().numpy()
+                frame = ((frame + 1.0) / 2.0 * 255.0).astype(np.uint8)
+                # 获取遮罩
+                mask = self.face_parser.parse(frame)  # (H,W,1)
+                mask_tensor = torch.from_numpy(mask).float().permute(2, 0, 1).to(device=self.device)  # (1,H,W)
+                # 复制通道，转换为3通道格式
+                mask_tensor = mask_tensor.repeat(3, 1, 1)  # (3,H,W) <-- 关键修改
+                masks.append(mask_tensor)
+            mask_tensor = torch.stack(masks, dim=0)  # (B,3,H,W)
+        
+        # 通过VAE编码到潜空间
+        # 将遮罩值范围从[0,1]转换到[-1,1]（注意：虽然我们现在有3个通道，但值应该都一样）
+        mask_normalized = mask_tensor * 2.0 - 1.0
+        mask_latent = self.encode_first_stage(mask_normalized)
+        
+        return mask_latent

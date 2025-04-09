@@ -454,7 +454,21 @@ class VideoUNet(nn.Module):
         time_context: Optional[th.Tensor] = None,
         num_video_frames: Optional[int] = None,
         image_only_indicator: Optional[th.Tensor] = None,
+        f_attr_low: Optional[th.Tensor] = None,  # 添加 f_attr_low 参数
     ):
+        """
+        应用UNet模型，并支持在适当位置注入f_attr_low特征。
+        
+        Args:
+            x: 输入张量
+            timesteps: 时间步
+            context: 上下文信息
+            y: 类别标签
+            time_context: 时间上下文
+            num_video_frames: 视频帧数
+            image_only_indicator: 图像指示器
+            f_attr_low: 低层次属性特征
+        """
         # --- 在方法开始时打印接收到的 num_video_frames ---
         logger.debug(f"[VideoUNet.forward] Received num_video_frames = {num_video_frames}")
         if num_video_frames is None: logger.warning("[VideoUNet.forward] num_video_frames is None!")
@@ -471,7 +485,7 @@ class VideoUNet(nn.Module):
             emb = emb + self.label_emb(y)
 
         h = x
-        for module in self.input_blocks:
+        for i_level, module in enumerate(self.input_blocks):
             # --- 在调用 module 前打印传递的 num_video_frames ---
             logger.debug(f"[VideoUNet.forward -> input_block] Passing num_video_frames = {num_video_frames}")
             # --- 在调用 module 前检查类型 ---
@@ -487,6 +501,21 @@ class VideoUNet(nn.Module):
                 time_context=time_context,
                 num_video_frames=num_video_frames,
             )
+            
+            # 在input_block_0后注入f_attr_low
+            if i_level == 0 and f_attr_low is not None:
+                logger.info(f"VideoUNet: f_attr_low形状: {f_attr_low.shape}, h形状: {h.shape}")
+                # 检查形状匹配
+                if f_attr_low.shape[1] == h.shape[1]:  # 检查通道维度
+                    if f_attr_low.shape[0] == h.shape[0]:  # 检查批次维度
+                        # 直接加法注入
+                        h = h + f_attr_low
+                        logger.info(f"VideoUNet: 在input_block_0后成功注入f_attr_low特征")
+                    else:
+                        logger.warning(f"VideoUNet: 批次维度不匹配: f_attr_low={f_attr_low.shape[0]}, h={h.shape[0]}")
+                else:
+                    logger.warning(f"VideoUNet: 通道维度不匹配，跳过注入: f_attr_low通道={f_attr_low.shape[1]}, h通道={h.shape[1]}")
+            
             hs.append(h)
         # --- 对 middle_block 和 output_blocks 的调用也添加类似日志 ---
         logger.debug(f"[VideoUNet.forward -> middle_block] Passing num_video_frames = {num_video_frames}")
@@ -1197,7 +1226,21 @@ class SpatialUNetModelWithTime(nn.Module):
         cond_view: Optional[th.Tensor] = None,
         cond_motion: Optional[th.Tensor] = None,
         time_step: Optional[int] = None,
+        f_attr_low: Optional[th.Tensor] = None,  # 添加 f_attr_low 参数
     ):
+        """
+        应用UNet模型，并支持在适当位置注入f_attr_low特征。
+        
+        Args:
+            x: 输入张量
+            timesteps: 时间步
+            context: 上下文信息
+            y: 类别标签
+            time_context: 时间上下文
+            num_video_frames: 视频帧数
+            image_only_indicator: 图像指示器
+            f_attr_low: 低层次属性特征
+        """
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional -> no, relax this TODO"
@@ -1225,6 +1268,19 @@ class SpatialUNetModelWithTime(nn.Module):
                 time_step=time_step,
                 name='encoder_{}_{}'.format(time, i)
             )
+            # 在input_block_0后注入f_attr_low
+            if i == 0 and f_attr_low is not None:
+                logger.info(f"VideoUNet: f_attr_low形状: {f_attr_low.shape}, h形状: {h.shape}")
+                # 检查形状匹配
+                if f_attr_low.shape[1] == h.shape[1]:  # 检查通道维度
+                    if f_attr_low.shape[0] == h.shape[0]:  # 检查批次维度
+                        # 直接加法注入
+                        h = h + f_attr_low
+                        logger.info(f"VideoUNet: 在input_block_0后成功注入f_attr_low特征")
+                    else:
+                        logger.warning(f"VideoUNet: 批次维度不匹配: f_attr_low={f_attr_low.shape[0]}, h={h.shape[0]}")
+                else:
+                    logger.warning(f"VideoUNet: 通道维度不匹配，跳过注入: f_attr_low通道={f_attr_low.shape[1]}, h通道={h.shape[1]}")
             hs.append(h)
         h = self.middle_block(
             h,

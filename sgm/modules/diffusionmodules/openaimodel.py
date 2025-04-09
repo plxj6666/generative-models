@@ -830,35 +830,63 @@ class UNetModel(nn.Module):
         timesteps: Optional[th.Tensor] = None,
         context: Optional[th.Tensor] = None,
         y: Optional[th.Tensor] = None,
-        **kwargs,
+        f_attr_low: Optional[th.Tensor] = None,  # 添加f_attr_low参数
+        **kwargs
     ) -> th.Tensor:
         """
-        Apply the model to an input batch.
-        :param x: an [N x C x ...] Tensor of inputs.
-        :param timesteps: a 1-D batch of timesteps.
-        :param context: conditioning plugged in via crossattn
-        :param y: an [N] Tensor of labels, if class-conditional.
-        :return: an [N x C x ...] Tensor of outputs.
+        在合适的位置注入f_attr_low特征。
+        
+        Args:
+            x: VAE潜变量+噪声+遮罩的输入
+            timesteps: 时间步
+            context: 条件上下文
+            y: 类标签
+            f_attr_low: 低层次属性特征
         """
-        assert (y is not None) == (
-            self.num_classes is not None
-        ), "must specify y if and only if the model is class-conditional"
-        hs = []
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-        emb = self.time_embed(t_emb)
-
+        # 标准时间嵌入处理
+        assert (y is not None) == (self.num_classes is not None)
+        if timesteps is None:
+            timesteps = th.zeros(x.shape[0], device=x.device).long()
+        
+        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        
         if self.num_classes is not None:
             assert y.shape[0] == x.shape[0]
             emb = emb + self.label_emb(y)
-
+        
+        # 初始化输入和记录列表
         h = x
-        for module in self.input_blocks:
+        hs = []
+        
+        # 下采样阶段
+        for i_level, module in enumerate(self.input_blocks):
             h = module(h, emb, context)
+            
+            # 在input_block_0后注入f_attr_low
+            if i_level == 0 and f_attr_low is not None:
+                logpy.info(f"f_attr_low形状: {f_attr_low.shape}, h形状: {h.shape}")
+                # 检查形状匹配
+                if f_attr_low.shape[1] == h.shape[1]:  # 检查通道维度
+                    if f_attr_low.shape[0] == h.shape[0]:  # 检查批次维度
+                        # 直接加法注入
+                        h = h + f_attr_low
+                        logpy.info(f"在input_block_0后成功注入f_attr_low特征")
+                    else:
+                        # 视频帧批处理的情况
+                        logpy.warn(f"批次维度不匹配: f_attr_low={f_attr_low.shape[0]}, h={h.shape[0]}")
+                else:
+                    logpy.warn(f"通道维度不匹配，跳过注入: f_attr_low通道={f_attr_low.shape[1]}, h通道={h.shape[1]}")
+        
             hs.append(h)
+    
+        # 中间块处理
         h = self.middle_block(h, emb, context)
+        
+        # 上采样阶段
         for module in self.output_blocks:
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context)
+        
+        # 最终输出
         h = h.type(x.dtype)
-
         return self.out(h)

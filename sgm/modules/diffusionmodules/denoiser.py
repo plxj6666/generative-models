@@ -29,24 +29,103 @@ class Denoiser(nn.Module):
         sigma: torch.Tensor,
         cond: Dict,
         num_video_frames: Optional[int] = None,
+        f_attr_low: Optional[torch.Tensor] = None,
         **additional_model_inputs,
     ) -> torch.Tensor:
+        """
+        修改后的 forward 方法，改进了参数处理和错误检测
+        
+        Args:
+            network: 要调用的 UNet 模型
+            input: 输入张量 (噪声 + VAE潜变量)
+            sigma: 噪声水平
+            cond: 条件字典
+            num_video_frames: 视频帧数
+            f_attr_low: 低层次属性特征，用于在 UNet 内部注入
+        """
         sigma = self.possibly_quantize_sigma(sigma)
         sigma_shape = sigma.shape
         sigma = append_dims(sigma, input.ndim)
         c_skip, c_out, c_in, c_noise = self.scaling(sigma)
         c_noise = self.possibly_quantize_c_noise(c_noise.reshape(sigma_shape))
-        # --- 在调用 network 前打印 num_video_frames ---
-        num_frames_received = additional_model_inputs.get('num_video_frames')
-        logger.debug(f"[Denoiser.forward] Received num_video_frames = {num_frames_received}")
-        if num_frames_received is None: logger.warning("[Denoiser.forward] num_video_frames is None!")
-        # --- 在调用 network 前检查类型 ---
-        logger.debug(f"Denoiser: Before network, cond type: {type(cond)}")
-        if not isinstance(cond, dict) and cond is not None:
-             logger.error("Denoiser: Context became non-dict before network!")
-        # ---
+        
+        # 自动检测和处理视频帧数
+        final_num_frames = num_video_frames
+        
+        # 尝试多种方式确定视频帧数
+        if final_num_frames is None:
+            # 1. 检查 additional_model_inputs
+            final_num_frames = additional_model_inputs.get('num_video_frames')
+            
+            # 2. 检查 cond 字典
+            if final_num_frames is None and isinstance(cond, dict) and 'num_frames' in cond:
+                final_num_frames = cond['num_frames']
+                logger.info(f"从cond字典获取num_video_frames={final_num_frames}")
+            
+            # 3. 从输入形状推断
+            if final_num_frames is None and len(input.shape) == 5:  # (B,T,C,H,W)
+                final_num_frames = input.shape[1]
+                logger.info(f"从input形状推断num_video_frames={final_num_frames}")
+            
+            # 4. 从 f_attr_low 推断（如果可能）
+            if final_num_frames is None and f_attr_low is not None:
+                if len(f_attr_low.shape) == 5:  # (B,T,C,H,W)
+                    final_num_frames = f_attr_low.shape[1]
+                    logger.info(f"从f_attr_low形状推断num_video_frames={final_num_frames}")
+        
+        # 如果仍然无法确定，使用默认值并发出警告
+        if final_num_frames is None:
+            logger.warning("无法确定视频帧数，使用默认值2")
+            final_num_frames = 2
+        
+        # 检查 f_attr_low 批次大小与输入的匹配性
+        if f_attr_low is not None:
+            input_batch_size = input.shape[0]
+            if len(input.shape) == 5:
+                input_batch_size = input.shape[0] * input.shape[1]
+                
+            f_attr_batch_size = f_attr_low.shape[0]
+            if len(f_attr_low.shape) == 5:
+                f_attr_batch_size = f_attr_low.shape[0] * f_attr_low.shape[1]
+                
+            if f_attr_batch_size != input_batch_size:
+                logger.warning(f"f_attr_low批次大小({f_attr_batch_size})与输入({input_batch_size})不匹配")
+                if f_attr_batch_size == 1:
+                    # 单个样本，扩展到所有批次
+                    if len(f_attr_low.shape) == 4:  # (1,C,H,W)
+                        f_attr_low = f_attr_low.repeat(input_batch_size, 1, 1, 1)
+                        logger.info(f"f_attr_low已扩展至匹配输入批次: {f_attr_low.shape}")
+        
+        # 确保 cond 是一个字典
+        if cond is None:
+            cond = {}
+        elif not isinstance(cond, dict):
+            logger.error(f"cond不是字典类型: {type(cond)}，尝试转换")
+            try:
+                if hasattr(cond, 'keys'):
+                    # 尝试转换为字典
+                    cond = {k: cond[k] for k in cond.keys()}
+                else:
+                    # 无法转换，创建新字典
+                    cond = {"context": cond}
+            except Exception as e:
+                logger.error(f"转换cond为字典失败: {e}")
+                cond = {}
+        
+        # 记录 f_attr_low 信息
+        if f_attr_low is not None:
+            logger.debug(f"[Denoiser.forward] 传递f_attr_low，形状: {f_attr_low.shape}")
+        
+        # 调用网络
         return (
-            network(input * c_in, c_noise, cond, num_video_frames=num_video_frames, **additional_model_inputs) * c_out
+            network(
+                input * c_in, 
+                c_noise, 
+                cond, 
+                num_video_frames=final_num_frames, 
+                f_attr_low=f_attr_low,
+                **additional_model_inputs
+            ) * c_out
             + input * c_skip
         )
 
